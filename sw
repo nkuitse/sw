@@ -404,24 +404,39 @@ sub cmd_add {
     usage('add MACHINE [KEY=VALUE...]') if @ARGV < 1;
     my $mach = shift @ARGV;
     opendb($dbfile);
-    my $sth = $dbh->prepare(q{
-        INSERT INTO machines (name, osname, osversion)
-        VALUES               (?,    ?,      ?        )
-    });
+    my $mid = add_machine($mach);
     my @props = argv2props();
     my %prop;
     foreach (@props) {
         my ($k, $v) = @$_;
         push @{ $prop{$k} ||= [] }, $v;
     }
-    my ($osname, $osversion, @etc);
-    ($osname, @etc) = @{ delete $prop{'osname'} || [] };
-    fatal "a machine can have only one osname\n" if @etc;
-    ($osversion, @etc) = @{ delete $prop{'osversion'} || [] };
-    fatal "a machine can have only one osversion\n" if @etc;
-    fatal "unrecognized properties for machine $mach: ", join(' ', keys %prop)
-        if keys %prop;
-    $sth->execute($mach, $osname, $osversion);
+    my $sql = q{
+        INSERT INTO machine_properties
+                    (machine, key, value)
+    };
+    my (@values, @params);
+    foreach (argv2props()) {
+        push @values, q{
+                    (?,         ?,   ?)
+        };
+        push @params, ($mid, @$_);
+    }
+    substr($values[0], 12, 6) = 'VALUES';
+    $sql .= join(",\n", @values);
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+}
+
+sub add_machine {
+    my ($mach) = @_;
+    my $sth = $dbh->prepare(q{
+        INSERT INTO machines (name)
+        VALUES               (?   )
+    });
+    $sth->execute($mach);
+    my $mid = $dbh->last_insert_id("","","","");
+    return $mid;
 }
 
 # --- Other functions
@@ -891,9 +906,7 @@ sub initdb {
     my @sql = split /;\n/, q{
         CREATE TABLE machines (
             id          INTEGER PRIMARY KEY,
-            name        VARCHAR UNIQUE NOT NULL,
-            osname      VARCHAR,
-            osversion   VARCHAR
+            name        VARCHAR UNIQUE NOT NULL
         );
         CREATE TABLE networks (
             id          INTEGER PRIMARY KEY,
@@ -905,16 +918,20 @@ sub initdb {
             ipversion   INTEGER NOT NULL DEFAULT 4,
             address     VARCHAR,
             machine     INTEGER NULL,
-            network     INTEGER NULL
+            network     INTEGER NULL,
+            UNIQUE      (address, machine),
+            FOREIGN KEY (machine) REFERENCES machines(id)
         );
         CREATE TABLE hostnames (
             id          INTEGER PRIMARY KEY,
             hostname    VARCHAR NOT NULL,
-            address     INTEGER NOT NULL
+            address     INTEGER NOT NULL,
+            UNIQUE      (hostname, address)
+            FOREIGN KEY (address) REFERENCES addresses(id)
         );
         CREATE TABLE applications (
             id          INTEGER PRIMARY KEY,
-            name        VARCHAR NOT NULL,
+            name        VARCHAR UNIQUE NOT NULL,
             description VARCHAR NULL
         );
         CREATE TABLE instances (
@@ -922,23 +939,32 @@ sub initdb {
             machine     INTEGER NOT NULL,
             application INTEGER NOT NULL,
             version     VARCHAR,
-            qualifier   VARCHAR NULL);
+            qualifier   VARCHAR NULL
+            UNIQUE      (machine, application, version, qualifier),
+            FOREIGN KEY (machine) REFERENCES machines(id)
+        );
         CREATE TABLE instance_ports (
             id          INTEGER PRIMARY KEY,
             instance    INTEGER NOT NULL,
             address     INTEGER NULL,
             port        INTEGER NULL,
-            description VARCHAR
+            description VARCHAR,
+            UNIQUE      (instance, address, port),
+            FOREIGN KEY (instance) REFERENCES instances(id)
         );
         CREATE TABLE machine_properties (
             machine     INTEGER NOT NULL,
             key         VARCHAR,
-            value       VARCHAR
+            value       VARCHAR,
+            UNIQUE      (machine, key, value),
+            FOREIGN KEY (machine) REFERENCES machines(id)
         );
         CREATE TABLE instance_properties (
             instance    INTEGER NOT NULL,
             key         VARCHAR,
-            value       VARCHAR
+            value       VARCHAR,
+            UNIQUE      (instance, key, value),
+            FOREIGN KEY (instance) REFERENCES instances(id)
         );
     };
     foreach my $sql (@sql) {
