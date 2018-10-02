@@ -191,22 +191,6 @@ sub cmd_find {
     }
 }
 
-sub cmd_path {
-    usage('path [-d DB] MACHINE APPLICATION [WHAT]') if @ARGV < 2 || @ARGV > 3;
-    getopts();
-    opendb($dbfile);
-    my ($mach, $inst) = splice @ARGV, 0, 2;
-    my @paths = instance_paths_on_machine($mach, $inst, @ARGV);
-    foreach my $path (@paths) {
-        if (@ARGV) {
-            print $path->{'path'}, "\n";
-        }
-        else {
-            printf "%-8.8s %s\n", $path->{'what'}, $path->{'path'};
-        }
-    }
-}
-
 sub cmd_port {
     my ($mach, $inst, $qual, $addr);
     getopts(
@@ -512,6 +496,20 @@ sub on_machine_get {
     my ($app, $qual) = appqual(shift @_);
     my $iid = find_instance_id($mach, $app, $qual)
         or fatal("no such instance on $mach: " . appqual2str($app, $qual));
+    my @props = instance_properties($iid, @_);
+    foreach (@props) {
+        my ($k, $v) = @$_;
+        if (@_ == 1) {
+            print $v, "\n";
+        }
+        else {
+            print "$k $v\n";
+        }
+    }
+}
+
+sub instance_properties {
+    my $iid = shift;
     my $sql = q{
         SELECT  key,
                 value
@@ -521,19 +519,17 @@ sub on_machine_get {
     my @params = ($iid);
     if (@_) {
         $sql .= sprintf q{
-        AND     p.key IN ( %s )
+        AND     key IN ( %s )
         }, join(', ', map { '?' } @_);
         push @params, @_;
     }
     my $sth = $dbh->prepare($sql);
     $sth->execute(@params);
+    my @props;
     while (my ($k, $v) = $sth->fetchrow_array) {
-        if (@_ == 1) {
-            print $v, "\n";
-            last;
-        }
-        print "$k $v\n";
+        push @props, [$k, $v];
     }
+    return @props;
 }
 
 sub instances_on_machine {
@@ -557,37 +553,7 @@ sub instances_on_machine {
     return @apps;
 }
 
-sub application_paths_on_machine {
-    my ($mach, $inst, $what) = @_;
-    my $sql = q{
-        SELECT  p.*
-        FROM    instance_paths p,
-                instances i,
-                applications a,
-                machines m
-        WHERE   p.app = i.id
-        AND     i.application = a.id
-        AND     i.machine = m.id
-        AND     lower(m.name) = lower(?)
-        AND     lower(a.name) = lower(?)
-    };
-    my @params = ($mach, $inst);
-    if (defined $what) {
-        $sql .= q{
-            AND     lower(p.what) = lower(?)
-        };
-        push @params, $what;
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @paths;
-    while (my $path = $sth->fetchrow_hashref) {
-        push @paths, $path;
-    }
-    return @paths;
-}
-
-sub application_ports_on_machine {
+sub instance_ports_on_machine {
     my ($mach, $inst, $qual, $addr) = @_;
     my $sql0 = q{
         SELECT  p.port
@@ -703,13 +669,6 @@ sub initdb {
             address     INTEGER NULL,
             port        INTEGER NULL,
             description VARCHAR
-        );
-        CREATE TABLE instance_paths (
-            id          INTEGER PRIMARY KEY,
-            instance    INTEGER NOT NULL,
-            path        VARCHAR NOT NULL,
-            what        VARCHAR, /* root|exec|log|... */
-            description VARCHAR NULL
         );
         CREATE TABLE instance_properties (
             instance    INTEGER NOT NULL,
