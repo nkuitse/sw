@@ -39,12 +39,65 @@ sub cmd_machines {
     getopts();
     opendb($dbfile);
     if (@ARGV == 0) {
-        # List machines
+        # List all machines
         my @machines = machines();
         print $_->{'name'}, "\n" for @machines;
     }
     else {
-        usage('machines [-d DB]');
+        my @machs = find_machines_with_properties(@ARGV);
+        fatal "no machines found\n" if !@machs;
+        print $_, "\n" for @machs;
+    }
+}
+
+sub cmd_hosts {
+    my ($by_machine, $long);
+    getopts(
+        'm|by-machine' => \$by_machine,
+        'l|long' => \$long,
+    );
+    opendb($dbfile);
+    my $sth = $dbh->prepare(q{
+        SELECT  a.address,
+                h.hostname,
+                m.name
+        FROM    addresses a,
+                machines m,
+                hostnames h
+        WHERE   a.machine = m.id
+        AND     h.address = a.id
+    });
+    $sth->execute;
+    if ($by_machine) {
+        my %mach2addr;
+        while (my ($addr, $host, $mach) = $sth->fetchrow_array) {
+            $mach2addr{$mach}{$addr}{$host} = 1;
+        }
+        foreach my $mach (sort keys %mach2addr) {
+            print '# ', $mach, "\n";
+            my $addr2host = $mach2addr{$mach};
+            foreach my $addr (sort keys %$addr2host) {
+                my @hosts = sort keys %{ $addr2host->{$addr} };
+                print join(' ', $addr, @hosts), "\n";
+            }
+            print "\n";
+        }
+    }
+    else {
+        my %addr2host;
+        while (my ($addr, $host, $mach) = $sth->fetchrow_array) {
+            $addr2host{$addr}{$host} = $mach;
+        }
+        foreach my $addr (sort keys %addr2host) {
+            my @hosts = sort keys %{ $addr2host{$addr} };
+            my %mach = map { $_ => 1 } values %{ $addr2host{$addr} };
+            if ($long) {
+                print join(' ', $addr, @hosts, map { '#'.$_} sort keys %mach), "\n";
+            }
+            else {
+                print join(' ', $addr, @hosts), "\n";
+            }
+        }
     }
 }
 
@@ -159,15 +212,92 @@ sub cmd_export {
     }
 }
 
+sub find_machines_with_properties {
+    my $sql = q{
+        SELECT  DISTINCT
+                name
+        FROM    machines
+    };
+    my (@clauses, @params);
+    foreach (@_) {
+        m{^([^!=~]+)(!?[=~])(.*)$} or usage;
+        my ($k, $op, $v) = ($1, $2, $3);
+        push @params, ($k, $v);
+        if ($op =~ /~$/) {
+            $op = ($op =~ /^!/ ? 'NOT REGEXP' : 'REGEXP');
+        }
+        push @clauses, qq{
+        AND     id IN (SELECT machine FROM machine_properties WHERE key = ? AND value $op ?)
+        };
+    }
+    $clauses[0] =~ s/AND  /WHERE/;
+    $sql .= join('', @clauses);
+    $sql .= q{
+        ORDER   BY name
+    };
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my @machs;
+    while (my ($mach) = $sth->fetchrow_array) {
+        push @machs, $mach;
+    }
+    return @machs;
+}
+
 sub cmd_find {
     getopts();
     opendb($dbfile);
-    if (@ARGV == 1) {
-        my $arg = shift @ARGV;
+    if (@ARGV > 0 && grep { /.+[=~]/ } @ARGV) {
+        # Find instances with the given properties
+        my $usage = 'find [APPLICATION] [KEY=VALUE]...';
+        my (@clauses, @params);
+        my $sql = q{
+            SELECT  DISTINCT
+                    a.name,
+                    i.qualifier,
+                    m.name
+            FROM    applications a,
+                    instances i,
+                    machines m,
+                    instance_properties p
+            WHERE   a.id = i.application
+            AND     m.id = i.machine
+            AND     i.id = p.instance
+        };
+        if ($ARGV[0] !~ /[=~]/) {
+            my $app = shift @ARGV;
+            $sql .= q{
+            AND     a.name = ?
+            };
+            push @params, $app;
+        }
+        foreach (@ARGV) {
+            m{^([^!=~]+)(!?[=~])(.*)$} or usage;
+            my ($k, $op, $v) = ($1, $2, $3);
+            push @params, ($k, $v);
+            if ($op =~ /~$/) {
+                $op = ($op =~ /^!/ ? 'NOT REGEXP' : 'REGEXP');
+            }
+            push @clauses, qq{
+            AND     i.id IN (SELECT instance FROM instance_properties WHERE key = ? AND value $op ?)
+            };
+        }
+        $sql .= join('', @clauses);
+        $sql .= q{
+            ORDER   BY a.name, m.name, i.qualifier
+        };
+        my $sth = $dbh->prepare($sql);
+        $sth->execute(@params);
+        while (my ($app, $qual, $mach) = $sth->fetchrow_array) {
+            print join(' ', appqual2str($app, $qual), $mach), "\n";
+        }
+    }
+    elsif (@ARGV == 1) {
+        my $app = shift @ARGV;
         my $op = '=';
-        if ($arg =~ m{^/(.+)/$}) {
+        if ($app =~ m{^/(.+)/$}) {
             $op = 'REGEXP';
-            $arg = $1;
+            $app = $1;
         }
         my $sql = qq{
             SELECT  a.name,
@@ -183,11 +313,14 @@ sub cmd_find {
             ORDER   BY a.name, m.name, i.qualifier
         };
         my $sth = $dbh->prepare($sql);
-        $sth->execute($arg);
-        while (my ($aname, $mname, $iinst, $ivers) = $sth->fetchrow_array) {
-            $aname .= ':' . $iinst if defined $iinst;
-            print join(' ', grep { defined $_ } $mname, $aname, $ivers), "\n";
+        $sth->execute($app);
+        while (my ($aname, $mname, $qual, $vers) = $sth->fetchrow_array) {
+            $aname .= ':' . $qual if defined $qual;
+            print join(' ', grep { defined $_ } $mname, $aname, $vers), "\n";
         }
+    }
+    else {
+        usage('find APPLICATION|KEY=VALUE...');
     }
 }
 
@@ -211,25 +344,48 @@ sub cmd_port {
 }
 
 sub cmd_set {
-    my $usage = 'set MACHINE (name|osname|osversion)=VALUE...';
-    getopts() or usage($usage);;
+    my $usage = 'set MACHINE KEY=VALUE...';
+    getopts() or usage($usage);
     opendb($dbfile);
-    my (@cols, @params);
     usage($usage) if @ARGV < 2;
     my $mach = shift @ARGV;
+    my $mid = machine_id($mach)
+        or fatal "no such machine: $mach";
+    my $sql = q{
+        INSERT OR IGNORE INTO machine_properties
+                    (machine, key, value)
+    };
+    my (@values, @params);
     foreach (argv2props()) {
-        my ($k, $v) = @$_;
-        usage($usage) if $k !~ /^(name|osname|osversion)$/;
-        push @cols, $k;
-        push @params, $v;
+        push @values, q{
+                    (?,         ?,   ?)
+        };
+        push @params, ($mid, @$_);
     }
-    my $sql = sprintf q{
-        UPDATE machines
-        SET    %s
-        WHERE  name = ?
-    }, join(', ', map { "$_ = ?" } @cols);
+    substr($values[0], 12, 6) = 'VALUES';
+    $sql .= join(",\n", @values);
     my $sth = $dbh->prepare($sql);
-    $sth->execute(@params, $mach);
+    $sth->execute(@params);
+}
+
+sub cmd_get {
+    my $usage = 'get MACHINE [KEY[=VALUE]...]';
+    getopts() or usage($usage);
+    opendb($dbfile);
+    usage($usage) if @ARGV < 1;
+    my $mach = shift @ARGV;
+    my $mid = machine_id($mach)
+        or fatal "no such machine: $mach";
+    my @props = machine_properties($mid, @_);
+    foreach (@props) {
+        my ($k, $v) = @$_;
+        if (@_ == 1) {
+            print $v, "\n";
+        }
+        else {
+            print "$k $v\n";
+        }
+    }
 }
 
 sub cmd_on {
@@ -320,25 +476,17 @@ sub on_machine_add {
     my $mach = shift;
     my ($app, $qual) = appqual(shift());
     my @props = argv2props(@_);
-    my ($vers) = map { $_->[1] } grep { $_->[0] eq 'version' } @props;
-    @props = grep { $_->[0] ne 'version' } @props;
     # --- Get the machine ID
-    my $sth_machine = $dbh->prepare(q{SELECT id FROM machines WHERE lower(name) = lower(?)});
-    $sth_machine->execute($mach);
-    my ($mid) = $sth_machine->fetchrow_array;
-    fatal "no such machine: $mach" if !defined $mid;
+    my $mid = machine_id($mach)
+        or fatal "no such machine: $mach";
     # --- Get the application ID
-    my $sth_application = $dbh->prepare(q{SELECT id FROM applications WHERE lower(name) = lower(?)});
-    $sth_application->execute($app);
-    my ($aid) = $sth_application->fetchrow_array;
+    my $aid = application_id($app);
     if (!defined $aid) {
-        $sth_application = $dbh->prepare(q{INSERT INTO applications (name) VALUES (?)});
-        $sth_application->execute($app);
-        $aid = $dbh->last_insert_id("","","","");
+        $aid = add_application($app);
     }
     # --- Insert the instance
-    my $sth_install = $dbh->prepare(q{INSERT OR IGNORE INTO instances (machine, application, qualifier, version) VALUES (?, ?, ?, ?)});
-    $sth_install->execute($mid, $aid, $qual, $vers);
+    my $sth_install = $dbh->prepare(q{INSERT OR IGNORE INTO instances (machine, application, qualifier) VALUES (?, ?, ?)});
+    $sth_install->execute($mid, $aid, $qual);
     my $iid = $dbh->last_insert_id("","","","");
     # --- Insert the specified properties
     if (@props) {
@@ -358,6 +506,31 @@ sub on_machine_add {
         my $sth_props = $dbh->prepare($sql_props);
         $sth_props->execute(@params);
     }
+}
+
+sub machine_id {
+    my ($mach) = @_;
+    my $sth = $dbh->prepare(q{SELECT id FROM machines WHERE lower(name) = lower(?)});
+    $sth->execute($mach);
+    my ($mid) = $sth->fetchrow_array;
+    $sth->finish;
+    return $mid;
+}
+
+sub application_id {
+    my ($app) = @_;
+    my $sth = $dbh->prepare(q{SELECT id FROM applications WHERE lower(name) = lower(?)});
+    $sth->execute($app);
+    my ($aid) = $sth->fetchrow_array;
+    $sth->finish;
+    return $aid;
+}
+
+sub add_application {
+    my ($app) = @_;
+    my $sth = $dbh->prepare(q{INSERT INTO applications (name) VALUES (?)});
+    $sth->execute($app);
+    return $dbh->last_insert_id("","","","");
 }
 
 sub appqual {
@@ -410,7 +583,7 @@ sub on_machine_set {
     @props = grep { $_->[0] ne 'version' } @props;
     my @rm = map { defined $_->[1] ? () : ($_->[0]) } @props;
     @props = grep { defined $_->[1] } @props;
-    my $iid = find_instance_id($mach, $app, $qual)
+    my $iid = instance_id($mach, $app, $qual)
         or fatal("no such instance on $mach: " . appqual2str($app, $qual));
     # Set version
     if (defined $vers) {
@@ -454,7 +627,7 @@ sub on_machine_set {
     }
 }
 
-sub find_instance_id {
+sub instance_id {
     my ($mach, $app, $qual) = @_;
     my $sql = q{
         SELECT  i.id
@@ -494,7 +667,7 @@ sub on_machine_get {
     usage() if @_ < 2;
     my $mach = shift @_;
     my ($app, $qual) = appqual(shift @_);
-    my $iid = find_instance_id($mach, $app, $qual)
+    my $iid = instance_id($mach, $app, $qual)
         or fatal("no such instance on $mach: " . appqual2str($app, $qual));
     my @props = instance_properties($iid, @_);
     foreach (@props) {
@@ -514,6 +687,46 @@ sub on_machine_addresses {
     foreach (@addrs) {
         print $_->{'address'}, "\n";
     }
+}
+
+sub on_machine_hosts {
+    my ($mach) = @_;
+    my @hosts = machine_hosts($mach);
+    my %addr2host;
+    foreach (@hosts) {
+        $addr2host{$_->{'address'}}{$_->{'hostname'}} = 1;
+    }
+    foreach my $addr (sort keys %addr2host) {
+        my @hosts = sort keys %{ $addr2host{$addr} };
+        print join(' ', $addr, @hosts), "\n";
+    }
+}
+
+sub machine_properties {
+    my $mid = shift;
+    my $sql = q{
+        SELECT  key,
+                value
+        FROM    machine_properties
+        WHERE   machine = ?
+    };
+    my @params = ($mid);
+    if (@_) {
+        $sql .= sprintf q{
+        AND     key IN ( %s )
+        }, join(', ', map { '?' } @_);
+        push @params, @_;
+    }
+    $sql .= q{
+        ORDER   BY key, value
+    };
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my @props;
+    while (my ($k, $v) = $sth->fetchrow_array) {
+        push @props, [$k, $v];
+    }
+    return @props;
 }
 
 sub instance_properties {
@@ -651,6 +864,27 @@ sub machine_addresses {
     return @addrs;
 }
 
+sub machine_hosts {
+    my ($mach) = @_;
+    my $sth = $dbh->prepare(q{
+        SELECT  a.address,
+                a.network,
+                h.hostname
+        FROM    addresses a,
+                machines m,
+                hostnames h
+        WHERE   a.machine = m.id
+        AND     h.address = a.id
+        AND     lower(m.name) = lower(?)
+    });
+    $sth->execute($mach);
+    my @addrs;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @addrs, $row;
+    }
+    return @addrs;
+}
+
 sub initdb {
     my ($dbfile) = @_;
     opendb($dbfile);
@@ -695,6 +929,11 @@ sub initdb {
             address     INTEGER NULL,
             port        INTEGER NULL,
             description VARCHAR
+        );
+        CREATE TABLE machine_properties (
+            machine     INTEGER NOT NULL,
+            key         VARCHAR,
+            value       VARCHAR
         );
         CREATE TABLE instance_properties (
             instance    INTEGER NOT NULL,
