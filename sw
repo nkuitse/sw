@@ -508,6 +508,14 @@ sub on_machine_get {
     }
 }
 
+sub on_machine_addresses {
+    my ($mach) = @_;
+    my @addrs = machine_addresses($mach);
+    foreach (@addrs) {
+        print $_->{'address'}, "\n";
+    }
+}
+
 sub instance_properties {
     my $iid = shift;
     my $sql = q{
@@ -623,6 +631,24 @@ sub getopts {
         'd|database=s' => \$dbfile,
         @_,
     ) or usage;
+}
+
+sub machine_addresses {
+    my ($mach) = @_;
+    my $sth = $dbh->prepare(q{
+        SELECT  a.address,
+                a.network
+        FROM    addresses a,
+                machines m
+        WHERE   a.machine = m.id
+        AND     lower(m.name) = lower(?)
+    });
+    $sth->execute($mach);
+    my @addrs;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @addrs, $row;
+    }
+    return @addrs;
 }
 
 sub initdb {
