@@ -926,7 +926,7 @@ sub initdb {
             id          INTEGER PRIMARY KEY,
             hostname    VARCHAR NOT NULL,
             address     INTEGER NOT NULL,
-            UNIQUE      (hostname, address)
+            UNIQUE      (hostname, address),
             FOREIGN KEY (address) REFERENCES addresses(id)
         );
         CREATE TABLE applications (
@@ -939,7 +939,7 @@ sub initdb {
             machine     INTEGER NOT NULL,
             application INTEGER NOT NULL,
             version     VARCHAR,
-            qualifier   VARCHAR NULL
+            qualifier   VARCHAR NULL,
             UNIQUE      (machine, application, version, qualifier),
             FOREIGN KEY (machine) REFERENCES machines(id)
         );
@@ -970,4 +970,10 @@ sub initdb {
     foreach my $sql (@sql) {
         $dbh->do($sql);
     }
+}
+
+sub usage {
+    my $usage = @_ ? 'usage: sw ' . shift : 'usage: sw COMMAND [ARG...]';
+    print $_, "\n" for $usage, @_;
+    exit 1;
 }
