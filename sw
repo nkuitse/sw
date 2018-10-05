@@ -233,8 +233,7 @@ sub find_machines_with_properties {
     $clauses[0] =~ s/AND  /WHERE/;
     $sql .= join('', @clauses);
     $sql .= q{
-        ORDER   BY name
-    };
+        ORDER   BY name};
     my $sth = $dbh->prepare($sql);
     $sth->execute(@params);
     my @machs;
@@ -267,8 +266,7 @@ sub cmd_find {
         if ($ARGV[0] !~ /[=~]/) {
             my $app = shift @ARGV;
             $sql .= q{
-            AND     a.name = ?
-            };
+            AND     a.name = ?};
             push @params, $app;
         }
         foreach (@ARGV) {
@@ -284,8 +282,7 @@ sub cmd_find {
         }
         $sql .= join('', @clauses);
         $sql .= q{
-            ORDER   BY a.name, m.name, i.qualifier
-        };
+            ORDER   BY a.name, m.name, i.qualifier};
         my $sth = $dbh->prepare($sql);
         $sth->execute(@params);
         while (my ($app, $qual, $mach) = $sth->fetchrow_array) {
@@ -657,13 +654,11 @@ sub instance_id {
     my @params = ($mach, $app);
     if (!defined $qual) {
         $sql .= q{
-        AND     qualifier IS NULL
-        };
+        AND     qualifier IS NULL};
     }
     elsif ($qual ne '*') {
         $sql .= q{
-        AND     qualifier = ?
-        };
+        AND     qualifier = ?};
         push @params, $qual;
     }
     my $sth = $dbh->prepare($sql);
@@ -717,6 +712,28 @@ sub on_machine_hosts {
     }
 }
 
+sub on_machine_howto {
+    my ($mach, $verb, $app, @etc) = @_;
+    # --- Get the machine ID
+    my $mid = machine_id($mach)
+        or fatal "no such machine: $mach";
+    # --- Get the application ID
+    my $aid = application_id($app)
+        or fatal "no such application on $mach: $app";
+    my $sql = q{
+        SELECT  value
+        FROM    instance_properties
+        AND     machine = ?
+        AND     application = ?
+        AND     key = concat('howto:', ?)
+    };
+    my $sth = $dbh->prepare($sql);
+    $sth->execute($mid, $aid, $verb);
+    while (my ($val) = $sth->fetchrow_array) {
+        print $val, "\n";
+    }
+}
+
 sub machine_properties {
     my $mid = shift;
     my $sql = q{
@@ -728,13 +745,11 @@ sub machine_properties {
     my @params = ($mid);
     if (@_) {
         $sql .= sprintf q{
-        AND     key IN ( %s )
-        }, join(', ', map { '?' } @_);
+        AND     key IN ( %s )}, join(', ', map { '?' } @_);
         push @params, @_;
     }
     $sql .= q{
-        ORDER   BY key, value
-    };
+        ORDER   BY key, value};
     my $sth = $dbh->prepare($sql);
     $sth->execute(@params);
     my @props;
@@ -755,17 +770,105 @@ sub instance_properties {
     my @params = ($iid);
     if (@_) {
         $sql .= sprintf q{
-        AND     key IN ( %s )
-        }, join(', ', map { '?' } @_);
+        AND     key IN ( %s )}, join(', ', map { '?' } @_);
         push @params, @_;
     }
     my $sth = $dbh->prepare($sql);
     $sth->execute(@params);
     my @props;
+    my %seen;
     while (my ($k, $v) = $sth->fetchrow_array) {
-        push @props, [$k, $v];
+        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    }
+    foreach (instance_application_properties($iid, @_)) {
+        my ($k, $v, $c) = @$_;
+        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    }
+    foreach (instance_class_properties($iid, @_)) {
+        my ($k, $v, $c) = @$_;
+        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
     }
     return @props;
+}
+
+sub instance_class_properties {
+    my $iid = shift;
+    # Add class properties
+    my $sql = q{
+        SELECT  p.key,
+                p.value,
+                c.name
+        FROM    class_properties p,
+                classes c
+        WHERE   p.class = c.id
+        AND     c.name IN (
+                    SELECT  value
+                    FROM    instance_properties
+                    WHERE   instance = ?
+                    AND     key = 'class'
+                )
+    };
+    my @params = ($iid);
+    if (@_) {
+        $sql .= sprintf q{
+        AND     p.key IN ( %s )}, join(', ', map { '?' } @_);
+        push @params, @_;
+    }
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my @props;
+    my %seen;
+    while (my ($k, $v) = $sth->fetchrow_array) {
+        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    }
+    return @props;
+}
+
+sub instance_application_properties {
+    my $iid = shift;
+    # Add application properties
+    my $sql = q{
+        SELECT  p.key,
+                p.value
+        FROM    application_properties p,
+                applications a,
+                instances i
+        WHERE   p.application = a.id
+        AND     i.application = a.id
+        AND     i.id = ?
+    };
+    my @params = ($iid);
+    if (@_) {
+        $sql .= sprintf q{
+        AND     p.key IN ( %s )}, join(', ', map { '?' } @_);
+        push @params, @_;
+    }
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my @props;
+    my %seen;
+    while (my ($k, $v) = $sth->fetchrow_array) {
+        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    }
+    return @props;
+}
+
+sub instance_classes {
+    my ($iid) = @_;
+    my $sql = q{
+        SELECT  value
+        FROM    instance_properties
+        WHERE   instance = ?
+        AND     key = 'class'
+    };
+    my $sth = $dbh->prepare($sql);
+    $sth->execute($iid);
+    my @classes;
+    while (my ($class) = $sth->fetchrow_array) {
+        my $cid = class_id($class) or next;
+        push @classes, $class;
+    }
+    return @classes;
 }
 
 sub instances_on_machine {
@@ -934,6 +1037,13 @@ sub initdb {
             name        VARCHAR UNIQUE NOT NULL,
             description VARCHAR NULL
         );
+        CREATE TABLE application_properties (
+            application INTEGER NOT NULL,
+            key         VARCHAR NOT NULL,
+            value       VARCHAR,
+            UNIQUE      (application, key, value),
+            FOREIGN KEY (application) REFERENCES application(id)
+        );
         CREATE TABLE instances (
             id          INTEGER PRIMARY KEY,
             machine     INTEGER NOT NULL,
@@ -954,17 +1064,28 @@ sub initdb {
         );
         CREATE TABLE machine_properties (
             machine     INTEGER NOT NULL,
-            key         VARCHAR,
+            key         VARCHAR NOT NULL,
             value       VARCHAR,
             UNIQUE      (machine, key, value),
             FOREIGN KEY (machine) REFERENCES machines(id)
         );
         CREATE TABLE instance_properties (
             instance    INTEGER NOT NULL,
-            key         VARCHAR,
+            key         VARCHAR NOT NULL,
             value       VARCHAR,
             UNIQUE      (instance, key, value),
             FOREIGN KEY (instance) REFERENCES instances(id)
+        );
+        CREATE TABLE classes (
+            id          INTEGER PRIMARY KEY,
+            name        VARCHAR UNIQUE NOT NULL
+        );
+        CREATE TABLE class_properties (
+            class       INTEGER NOT NULL,
+            key         VARCHAR NOT NULL,
+            value       VARCHAR,
+            UNIQUE      (class, key, value),
+            FOREIGN KEY (class) REFERENCES classes(id)
         );
     };
     foreach my $sql (@sql) {
