@@ -112,9 +112,8 @@ sub cmd_ls {
         my $mach = shift @ARGV;
         my @insts = instances_on_machine($mach);
         foreach my $instance (@insts) {
-            my ($name, $qual, $vers) = @$instance{qw(name qualifier version)};
+            my ($name, $qual) = @$instance{qw(name qualifier)};
             $name .= ':' . $qual if defined $qual;
-            $name .= ' ' . $vers if defined $vers;
             print $name, "\n";
         }
     }
@@ -122,8 +121,7 @@ sub cmd_ls {
         my $sql = q{
             SELECT  m.name,
                     a.name,
-                    i.qualifier,
-                    i.version
+                    i.qualifier
             FROM    machines m,
                     instances i,
                     applications a
@@ -133,11 +131,11 @@ sub cmd_ls {
         };
         my $sth = $dbh->prepare($sql);
         $sth->execute;
-        my @rows = ( [qw(machine application version)] );
+        my @rows = ( [qw(machine application)] );
 
-        while (my ($mach, $app, $qual, $vers) = $sth->fetchrow_array) {
+        while (my ($mach, $app, $qual) = $sth->fetchrow_array) {
             $app .= ':' . $qual if defined $qual;
-            push @rows, [$mach, $app, $vers // '--'];
+            push @rows, [$mach, $app];
         }
         my @maxlen = (0, 0, 0);
         foreach my $row (@rows) {
@@ -162,7 +160,6 @@ sub cmd_export {
         SELECT  m.name,
                 a.name,
                 i.qualifier,
-                i.version,
                 p.key,
                 p.value
         FROM    machines m
@@ -174,10 +171,9 @@ sub cmd_export {
     my $sth = $dbh->prepare($sql);
     foreach my $mach (@ARGV) {
         $sth->execute($mach);
-        my ($app, $qual, $vers, $key, $val, %mach2inst);
-        while (($mach, $app, $qual, $vers, $key, $val) = $sth->fetchrow_array) {
+        my ($app, $qual, $key, $val, %mach2inst);
+        while (($mach, $app, $qual, $key, $val) = $sth->fetchrow_array) {
             $app .= ':' . $qual if defined $qual;
-            $app .= ' ' . $vers if defined $vers;
             if (defined $key) {
                 $mach2inst{$mach}{$app}{$key}{$val} = 1;
             }
@@ -299,8 +295,7 @@ sub cmd_find {
         my $sql = qq{
             SELECT  a.name,
                     m.name,
-                    i.qualifier,
-                    i.version
+                    i.qualifier
             FROM    applications a,
                     machines m,
                     instances i
@@ -311,9 +306,9 @@ sub cmd_find {
         };
         my $sth = $dbh->prepare($sql);
         $sth->execute($app);
-        while (my ($aname, $mname, $qual, $vers) = $sth->fetchrow_array) {
+        while (my ($aname, $mname, $qual) = $sth->fetchrow_array) {
             $aname .= ':' . $qual if defined $qual;
-            print join(' ', grep { defined $_ } $mname, $aname, $vers), "\n";
+            print join(' ', grep { defined $_ } $mname, $aname), "\n";
         }
     }
     else {
@@ -468,14 +463,12 @@ sub on_machine_ls {
     my ($mach) = @_;
     my @apps = instances_on_machine($mach);
     foreach my $inst (@apps) {
-        my ($name, $qual, $version) = @$inst{qw(name qualifier version)};
+        my ($name, $qual) = @$inst{qw(name qualifier)};
         $name .= ':' . $qual if defined $qual;
-        $name .= ' ' . $version if defined $version;
         print $name, "\n";
         next;
         my @parts = ($name);
         push @parts, '#'.$qual if defined $qual;
-        push @parts, $version if defined $version;
         print "@parts\n";
     }
 }
@@ -557,56 +550,16 @@ sub appqual2str {
     return $app;
 }
 
-sub on_machine_add_old {
-    my ($mach) = @_;
-    my $usage = 'on MACHINE add APPLICATION[:QUALIFIER] [version=VALUE]';
-    usage($usage) if @_ != 2;
-    my $app = shift;
-    my ($qual, $vers);
-    $qual = $1 if $app =~ s{:([^:]+)$}{};
-    if (@_ == 1) {
-        usage($usage) if shift(@_) !~ /^version=(.+)$/;
-        $vers = $1;
-    }
-    opendb($dbfile);
-    my $sth_machine = $dbh->prepare(q{SELECT id FROM machines WHERE lower(name) = lower(?)});
-    my $sth_application = $dbh->prepare(q{SELECT id FROM applications WHERE lower(name) = lower(?)});
-    my $sth_install = $dbh->prepare(q{
-        INSERT OR IGNORE INTO instances
-                (machine, application, qualifier, version)
-        VALUES  (?,       ?,           ?,        ?      )
-    });
-    $sth_machine->execute($mach);
-    my ($mid) = $sth_machine->fetchrow_array;
-    fatal "no such machine: $mach" if !defined $mid;
-    $sth_application->execute($app);
-    my ($aid) = $sth_application->fetchrow_array;
-    fatal "no such application: $app" if !defined $aid;
-    $sth_install->execute($mid, $aid, $qual, $vers);
-}
-
 sub on_machine_set {
     my $usage = 'on MACHINE set APPLICATION[:QUALIFIER] [KEY=VALUE...]';
     usage($usage) if @_ < 3;
     my $mach = shift;
     my ($app, $qual) = appqual(shift());
     my @props = argv2props(@_);
-    my ($vers) = map { $_->[1] } grep { $_->[0] eq 'version' } @props;
-    @props = grep { $_->[0] ne 'version' } @props;
     my @rm = map { defined $_->[1] ? () : ($_->[0]) } @props;
     @props = grep { defined $_->[1] } @props;
     my $iid = instance_id($mach, $app, $qual)
         or fatal("no such instance on $mach: " . appqual2str($app, $qual));
-    # Set version
-    if (defined $vers) {
-        my $sql = q{
-            UPDATE  instances
-            SET     version = ?
-            WHERE   id = ?
-        };
-        my $sth = $dbh->prepare($sql);
-        $sth->execute($vers, $iid);
-    }
     # Set properties
     if (@props) {
         my $sql = q{
@@ -875,8 +828,7 @@ sub instances_on_machine {
     my ($mach) = @_;
     my $sth = $dbh->prepare(q{
         SELECT  a.name,
-                i.qualifier,
-                i.version
+                i.qualifier
         FROM    instances i,
                 applications a,
                 machines m
@@ -1048,9 +1000,8 @@ sub initdb {
             id          INTEGER PRIMARY KEY,
             machine     INTEGER NOT NULL,
             application INTEGER NOT NULL,
-            version     VARCHAR,
             qualifier   VARCHAR NULL,
-            UNIQUE      (machine, application, version, qualifier),
+            UNIQUE      (machine, application, qualifier),
             FOREIGN KEY (machine) REFERENCES machines(id)
         );
         CREATE TABLE instance_ports (
