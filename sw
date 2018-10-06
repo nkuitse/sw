@@ -627,16 +627,24 @@ sub instance_id {
 }
 
 sub on_machine_get {
-    usage() if @_ < 2;
     my $mach = shift @_;
+    my $long;
+    if (@_ && $_[0] eq '-l') {
+        $long = 1;
+        shift;
+    }
+    usage() if @_ < 1;
     my ($app, $qual) = appqual(shift @_);
     my $iid = instance_id($mach, $app, $qual)
         or fatal("no such instance on $mach: " . appqual2str($app, $qual));
     my @props = instance_properties($iid, @_);
     foreach (@props) {
-        my ($k, $v) = @$_;
+        my ($k, $v, $t) = @$_;
         if (@_ == 1) {
             print $v, "\n";
+        }
+        elsif ($long) {
+            printf "%-12s %-12s %s\n", $t, $k, $v;
         }
         else {
             print "$k $v\n";
@@ -714,33 +722,92 @@ sub machine_properties {
 
 sub instance_properties {
     my $iid = shift;
+    my $key_limit_sql = sprintf q{
+        AND     p.key IN ( %s )},
+        join(', ', map { '?' } @_);
     my $sql = q{
-        SELECT  key,
-                value
-        FROM    instance_properties
-        WHERE   instance = ?
+        SELECT  p.key,
+                p.value,
+                'instance'
+        FROM    instance_properties p
+        WHERE   p.instance = ?
     };
     my @params = ($iid);
     if (@_) {
-        $sql .= sprintf q{
-        AND     key IN ( %s )}, join(', ', map { '?' } @_);
+        $sql .= $key_limit_sql;
+        push @params, @_;
+    }
+    $sql .= q{
+        UNION ALL
+        SELECT  p.key,
+                p.value,
+                'application'
+        FROM    application_properties p,
+                applications a,
+                instances i
+        WHERE   p.application = a.id
+        AND     i.application = a.id
+        AND     i.id = ?};
+    push @params, $iid;
+    if (@_) {
+        $sql .= $key_limit_sql;
+        push @params, @_;
+    }
+    $sql .= q{
+        UNION ALL
+        SELECT  p.key,
+                p.value,
+                'iclass'
+        FROM    class_properties p,
+                classes c
+        WHERE   p.class = c.id
+        AND     c.name IN (
+                    SELECT  p.value
+                    FROM    instance_properties p
+                    WHERE   p.instance = ?
+                    AND     p.key = 'class'
+                )};
+    push @params, $iid;
+    if (@_) {
+        $sql .= $key_limit_sql;
+        push @params, @_;
+    }
+    $sql .= q{
+        UNION ALL
+        SELECT  p.key,
+                p.value,
+                'aclass'
+        FROM    class_properties p,
+                classes c
+        WHERE   p.class = c.id
+        AND     c.name IN (
+                    SELECT  p.value
+                    FROM    application_properties p,
+                            instances i
+                    WHERE   p.application = i.application
+                    AND     i.id = ?
+                    AND     key = 'class'
+                )};
+    push @params, $iid;
+    if (@_) {
+        $sql .= $key_limit_sql;
         push @params, @_;
     }
     my $sth = $dbh->prepare($sql);
     $sth->execute(@params);
     my @props;
     my %seen;
-    while (my ($k, $v) = $sth->fetchrow_array) {
-        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    while (my ($k, $v, $t) = $sth->fetchrow_array) {
+        push @props, [$k, $v, $t] if !$seen{"$k\n$v"}++;
     }
-    foreach (instance_application_properties($iid, @_)) {
-        my ($k, $v, $c) = @$_;
-        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    }
-    foreach (instance_class_properties($iid, @_)) {
-        my ($k, $v, $c) = @$_;
-        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    }
+    ### foreach (instance_application_properties($iid, @_)) {
+    ###     my ($k, $v, $c) = @$_;
+    ###     push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    ### }
+    ### foreach (instance_class_properties($iid, @_)) {
+    ###     my ($k, $v, $c) = @$_;
+    ###     push @props, [$k, $v] if !$seen{"$k\n$v"}++;
+    ### }
     return @props;
 }
 
@@ -813,9 +880,18 @@ sub instance_classes {
         FROM    instance_properties
         WHERE   instance = ?
         AND     key = 'class'
+        UNION ALL
+        SELECT  value
+        FROM    application_properties p,
+                applications a,
+                instances i
+        WHERE   p.application = a.id
+        AND     i.application = a.id
+        AND     p.key = 'class'
+        AND     i.id = ?
     };
     my $sth = $dbh->prepare($sql);
-    $sth->execute($iid);
+    $sth->execute($iid, $iid);
     my @classes;
     while (my ($class) = $sth->fetchrow_array) {
         my $cid = class_id($class) or next;
