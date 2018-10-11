@@ -1,0 +1,5 @@
+PROG = sw
+PREFIX = /usr/local
+ENV_VAR=SW_DIR
+DB_DIR=/var/local/sw
+PLUGIN_DIR=/usr/local/sw/plugins

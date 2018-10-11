@@ -1,13 +1,19 @@
 include config.mk
 
-build: build/$(PROG)
+configure: config.mk
+	$(VISUAL) $<
 
-clean:
-	rm -Rf build
+config.mk: config.mk.def:
+	cp $< $@
+
+build: build/$(PROG)
 
 build/$(PROG): sw
 	install -d build
 	bin/build PROG=$(PROG) ENV_VAR=$(ENV_VAR) PREFIX=$(PREFIX) DB_DIR=$(DB_DIR) PLUGIN_DIR=$(PLUGIN_DIR) < $< > $@
+
+clean:
+	rm -Rf build
 
 install: install-prog install-plugins
 	
@@ -19,4 +25,4 @@ install-plugins:
 	install -d $(PLUGIN_DIR)
 	install -m 644 plugins/* $(PLUGIN_DIR)/
 
-.PHONY: build clean install
+.PHONY: configure build clean install
