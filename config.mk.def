@@ -1,5 +1,7 @@
+# Edit the following to suit your needs, then `make' to build
+
 PROG = sw
 PREFIX = /usr/local
-ENV_VAR=SW_DIR
-DB_DIR=/var/local/sw
-PLUGIN_DIR=/usr/local/sw/plugins
+ENV_VAR = SW_DIR
+DB_DIR = /var/local/sw
+PLUGIN_DIR = /usr/local/sw/plugins

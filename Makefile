@@ -3,7 +3,7 @@ include config.mk
 configure: config.mk
 	$(VISUAL) $<
 
-config.mk: config.mk.def:
+config.mk: config.mk.def
 	cp $< $@
 
 build: build/$(PROG)
