@@ -1,16 +1,16 @@
 include config.mk
 
+build: build/$(PROG)
+
 configure: config.mk
-	$(VISUAL) $<
 
 config.mk: config.mk.def
 	cp $< $@
+	$(VISUAL) $<
 
-build: build/$(PROG)
-
-build/$(PROG): sw
+build/$(PROG): configure sw
 	install -d build
-	bin/build PROG=$(PROG) ENV_VAR=$(ENV_VAR) PREFIX=$(PREFIX) DB_DIR=$(DB_DIR) PLUGIN_DIR=$(PLUGIN_DIR) < $< > $@
+	bin/build PROG=$(PROG) ENV_VAR=$(ENV_VAR) PREFIX=$(PREFIX) DB_DIR=$(DB_DIR) PLUGIN_DIR=$(PLUGIN_DIR) < sw > $@
 
 clean:
 	rm -Rf build

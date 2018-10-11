@@ -6,11 +6,10 @@ use warnings;
 my %sub = map { split /=/, $_, 2 } @ARGV;
 
 while (<STDIN>) {
-    s{
-        ^
-        use constant ([A-Z_]+) => '[^']+';
-    }{
-        sprintf q{use constant %s => '%s';}, $1, $sub{$1} || $1;
-    }egx;
-    print;
+    if (m{^use constant ([A-Z_]+) => '[^']+';}) {
+        printf qq{use constant %s => '%s';\n}, $1, $sub{$1} || $1;
+    }
+    else {
+        print;
+    }
 }
