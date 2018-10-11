@@ -3,1125 +3,1136 @@
 use strict;
 use warnings;
 
-use Cwd;
-use DBI;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
-sub fatal;
+use constant PROG => 'sw';
+use constant PREFIX => '/usr/local';
+use constant DB_DIR => '/var/local/sw';
+use constant PLUGIN_DIR => '/usr/local/sw/plugins';
+use constant ENV_VAR => 'SW_DIR';
+
+use constant IS_MAGIC  => 256;
+
+use constant OP_SET    => 1;
+use constant OP_APPEND => 2;
+use constant OP_REMOVE => 4;
+use constant OP_KEY    => 8;
+use constant OP_ANY    => ~IS_MAGIC;
+
 sub usage;
+sub fatal;
 
-my $root = '/site/var/sw';
-my $dbfile = $ENV{'SW_DBFILE'} || dbfile();
-my $dbh;
+(my $prog = $0) =~ s{.+/}{};
 
+my $root = PREFIX . '/' . PROG;
+my $dir = $ENV{ENV_VAR()} || DB_DIR;
+my $dbfile = 'catalog.sq3';
+my $app;
+my (%command, %hook);
+
+App::sw->init_plugins(PLUGIN_DIR);
+
+my ($cmd, $running);
 @ARGV = qw(shell) if !@ARGV;
-for ($ARGV[0]) {
-    unshift(@ARGV, 'ls'  ), last if s{^[@]}{};
-    unshift(@ARGV, 'find'), last if m{^/};
-}
-
-my $cmd = shift @ARGV;
-&{ __PACKAGE__->can('cmd_'.$cmd) or usage };
+$cmd = shift @ARGV;
+$cmd =~ tr/-/_/;
+&{ $command{$cmd} || __PACKAGE__->can('cmd_'.$cmd) || usage };
 
 # --- Command handlers
 
+sub cmd_help {
+    print STDERR "Help!\n";
+}
+
 sub cmd_init {
-    my $dir = @ARGV ? shift @ARGV : cwd();
-    $dir = "$root/$dir" if $dir !~ m{^[./]};
-    my $dbfile = $dir . '/sw.db';
+    #@ init [DIR] :: initialize an sw database
+    usage if @ARGV > 1;
+    @ARGV = qw(.) if !@ARGV;
+    ($dir) = @ARGV;
+    fatal "database file $dir/$dbfile already exists"
+        if -e "$dir/$dbfile";
     -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
-    initdb($dbfile);
+    chdir $dir or fatal "chdir $dir: $!";
+    $app = App::sw->create($dbfile);
     print STDERR "initialized: $dir\n";
 }
 
-sub cmd_machines {
-    getopts();
-    opendb($dbfile);
-    if (@ARGV == 0) {
-        # List all machines
-        my @machines = machines();
-        print $_->{'name'}, "\n" for @machines;
-    }
-    else {
-        my @machs = find_machines_with_properties(@ARGV);
-        fatal "no machines found\n" if !@machs;
-        print $_, "\n" for @machs;
-    }
+sub cmd_dbi {
+    orient();
+    usage if @ARGV;
+    undef $app;
+    exec('sqlite3', $dbfile);
 }
 
-sub cmd_hosts {
-    my ($by_machine, $long);
-    getopts(
-        'm|by-machine' => \$by_machine,
-        'l|long' => \$long,
-    );
-    opendb($dbfile);
-    my $sth = $dbh->prepare(q{
-        SELECT  a.address,
-                h.hostname,
-                m.name
-        FROM    addresses a,
-                machines m,
-                hostnames h
-        WHERE   a.machine = m.id
-        AND     h.address = a.id
+### sub cmd_dbq {
+###     orient();
+###     usage if !@ARGV;
+###     my $sql = shift @ARGV;
+###     my $sth = sth($sql);
+###     $sth->execute(@ARGV);
+###     while (my @row = map { defined $_ ? $_ : '' } $sth->fetchrow_array) {
+###         print join("\t", @row), "\n";
+###     }
+###     $sth->finish;
+### }
+### 
+### sub cmd_query {
+###     goto &cmd_dbq;
+### }
+
+sub cmd_add {
+    orient();
+    $app->_transact(sub {
+        foreach my $path (argv_pathlist()) {
+            $app->insert($path, @ARGV);
+        }
     });
-    $sth->execute;
-    if ($by_machine) {
-        my %mach2addr;
-        while (my ($addr, $host, $mach) = $sth->fetchrow_array) {
-            $mach2addr{$mach}{$addr}{$host} = 1;
-        }
-        foreach my $mach (sort keys %mach2addr) {
-            print '# ', $mach, "\n";
-            my $addr2host = $mach2addr{$mach};
-            foreach my $addr (sort keys %$addr2host) {
-                my @hosts = sort keys %{ $addr2host->{$addr} };
-                print join(' ', $addr, @hosts), "\n";
-            }
-            print "\n";
-        }
-    }
-    else {
-        my %addr2host;
-        while (my ($addr, $host, $mach) = $sth->fetchrow_array) {
-            $addr2host{$addr}{$host} = $mach;
-        }
-        foreach my $addr (sort keys %addr2host) {
-            my @hosts = sort keys %{ $addr2host{$addr} };
-            my %mach = map { $_ => 1 } values %{ $addr2host{$addr} };
-            if ($long) {
-                print join(' ', $addr, @hosts, map { '#'.$_} sort keys %mach), "\n";
-            }
-            else {
-                print join(' ', $addr, @hosts), "\n";
-            }
-        }
-    }
-}
-
-sub cmd_ls {
-    my ($long);
-    getopts(
-        'l|long' => \$long,
-    );
-    opendb($dbfile);
-    if (@ARGV == 1) {
-        # List software on the given machine
-        my $mach = shift @ARGV;
-        my @insts = instances_on_machine($mach);
-        foreach my $instance (@insts) {
-            my ($name, $qual) = @$instance{qw(name qualifier)};
-            $name .= ':' . $qual if defined $qual;
-            print $name, "\n";
-        }
-    }
-    else {
-        my $sql = q{
-            SELECT  m.name,
-                    a.name,
-                    i.qualifier
-            FROM    machines m,
-                    instances i,
-                    applications a
-            WHERE   i.machine = m.id
-            AND     i.application = a.id
-            ORDER   BY m.name, a.name, i.qualifier
-        };
-        my $sth = $dbh->prepare($sql);
-        $sth->execute;
-        my @rows = ( [qw(machine application)] );
-
-        while (my ($mach, $app, $qual) = $sth->fetchrow_array) {
-            $app .= ':' . $qual if defined $qual;
-            push @rows, [$mach, $app];
-        }
-        my @maxlen = (0, 0, 0);
-        foreach my $row (@rows) {
-            foreach my $i (0..2) {
-                my $len = length $row->[$i];
-                $maxlen[$i] = $len if $len > $maxlen[$i];
-            }
-        }
-        splice @rows, 1, 0, [map { '-' x $_ } @maxlen];
-        my $format = join('  ', map { "%-${_}.${_}s" } @maxlen) . "\n";
-        foreach (@rows) {
-            printf $format, @$_;
-        }
-    }
-}
-
-sub cmd_export {
-    getopts();
-    opendb($dbfile);
-    @ARGV = map { $_->{'name'} } machines() if !@ARGV;
-    my $sql = q{
-        SELECT  m.name,
-                a.name,
-                i.qualifier,
-                p.key,
-                p.value
-        FROM    machines m
-                INNER JOIN instances i ON m.id = i.machine
-                INNER JOIN applications a ON i.application = a.id
-                LEFT OUTER JOIN instance_properties p ON p.instance = i.id
-        WHERE   lower(m.name) = lower(?)
-    };
-    my $sth = $dbh->prepare($sql);
-    foreach my $mach (@ARGV) {
-        $sth->execute($mach);
-        my ($app, $qual, $key, $val, %mach2inst);
-        while (($mach, $app, $qual, $key, $val) = $sth->fetchrow_array) {
-            $app .= ':' . $qual if defined $qual;
-            if (defined $key) {
-                $mach2inst{$mach}{$app}{$key}{$val} = 1;
-            }
-            else {
-                $mach2inst{$mach}{$app} ||= {};
-            }
-        }
-        foreach $mach (sort keys %mach2inst) {
-            print "machine $mach {\n";
-            my $mhash = $mach2inst{$mach};
-            foreach $app (sort keys %$mhash) {
-                my $ihash = $mhash->{$app};
-                print "  $app";
-                my @keys = sort keys %$ihash;
-                if (@keys) {
-                    print " {\n";
-                    foreach $key (@keys) {
-                        my @vals = sort keys %{ $ihash->{$key} };
-                        foreach $val (sort @vals) {
-                            print "    $key $val\n";
-                        }
-                    }
-                    print "  }\n";
-                }
-                else {
-                    print "\n";
-                }
-            }
-            print "}\n";
-            1;
-        }
-    }
-}
-
-sub find_machines_with_properties {
-    my $sql = q{
-        SELECT  DISTINCT
-                name
-        FROM    machines
-    };
-    my (@clauses, @params);
-    foreach (@_) {
-        m{^([^!=~]+)(!?[=~])(.*)$} or usage;
-        my ($k, $op, $v) = ($1, $2, $3);
-        push @params, ($k, $v);
-        if ($op =~ /~$/) {
-            $op = ($op =~ /^!/ ? 'NOT REGEXP' : 'REGEXP');
-        }
-        push @clauses, qq{
-        AND     id IN (SELECT machine FROM machine_properties WHERE key = ? AND value $op ?)
-        };
-    }
-    $clauses[0] =~ s/AND  /WHERE/;
-    $sql .= join('', @clauses);
-    $sql .= q{
-        ORDER   BY name};
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @machs;
-    while (my ($mach) = $sth->fetchrow_array) {
-        push @machs, $mach;
-    }
-    return @machs;
-}
-
-sub cmd_find {
-    getopts();
-    opendb($dbfile);
-    if (@ARGV > 0 && grep { /.+[=~]/ } @ARGV) {
-        # Find instances with the given properties
-        my $usage = 'find [APPLICATION] [KEY=VALUE]...';
-        my (@clauses, @params);
-        my $sql = q{
-            SELECT  DISTINCT
-                    a.name,
-                    i.qualifier,
-                    m.name
-            FROM    applications a,
-                    instances i,
-                    machines m,
-                    instance_properties p
-            WHERE   a.id = i.application
-            AND     m.id = i.machine
-            AND     i.id = p.instance
-        };
-        if ($ARGV[0] !~ /[=~]/) {
-            my $app = shift @ARGV;
-            $sql .= q{
-            AND     a.name = ?};
-            push @params, $app;
-        }
-        foreach (@ARGV) {
-            m{^([^!=~]+)(!?[=~])(.*)$} or usage;
-            my ($k, $op, $v) = ($1, $2, $3);
-            push @params, ($k, $v);
-            if ($op =~ /~$/) {
-                $op = ($op =~ /^!/ ? 'NOT REGEXP' : 'REGEXP');
-            }
-            push @clauses, qq{
-            AND     i.id IN (SELECT instance FROM instance_properties WHERE key = ? AND value $op ?)
-            };
-        }
-        $sql .= join('', @clauses);
-        $sql .= q{
-            ORDER   BY a.name, m.name, i.qualifier};
-        my $sth = $dbh->prepare($sql);
-        $sth->execute(@params);
-        while (my ($app, $qual, $mach) = $sth->fetchrow_array) {
-            print join(' ', appqual2str($app, $qual), $mach), "\n";
-        }
-    }
-    elsif (@ARGV == 1) {
-        my $app = shift @ARGV;
-        my $op = '=';
-        if ($app =~ m{^/(.+)/$}) {
-            $op = 'REGEXP';
-            $app = $1;
-        }
-        my $sql = qq{
-            SELECT  a.name,
-                    m.name,
-                    i.qualifier
-            FROM    applications a,
-                    machines m,
-                    instances i
-            WHERE   a.id = i.application
-            AND     m.id = i.machine
-            AND     a.name $op ?
-            ORDER   BY a.name, m.name, i.qualifier
-        };
-        my $sth = $dbh->prepare($sql);
-        $sth->execute($app);
-        while (my ($aname, $mname, $qual) = $sth->fetchrow_array) {
-            $aname .= ':' . $qual if defined $qual;
-            print join(' ', grep { defined $_ } $mname, $aname), "\n";
-        }
-    }
-    else {
-        usage('find APPLICATION|KEY=VALUE...');
-    }
-}
-
-sub cmd_port {
-    my ($mach, $inst, $qual, $addr);
-    getopts(
-        'q|qualifier=s' => \$qual,
-        'a|address=s' => \$addr,
-    );
-    usage('port [-d DB] [-i INSTANCE] [-a ADDRESS] MACHINE [APPLICATION]') if @ARGV < 1 || @ARGV > 2;
-    opendb($dbfile);
-    ($mach, $inst) = @ARGV;
-    my @ports = instance_ports_on_machine($mach, $inst, $qual, $addr);
-    foreach my $port (@ports) {
-        my $addr = $port->{'address'};
-        my @parts = defined $inst ? () : ($port->{'name'});
-        push @parts, $port->{'port'};
-        push @parts, '@'.$port->{'address'} if defined $port->{'address'};
-        print "@parts\n";
-    }
 }
 
 sub cmd_set {
-    my $usage = 'set MACHINE KEY=VALUE...';
-    getopts() or usage($usage);
-    opendb($dbfile);
-    usage($usage) if @ARGV < 2;
-    my $mach = shift @ARGV;
-    my $mid = machine_id($mach)
-        or fatal "no such machine: $mach";
-    my $sql = q{
-        INSERT OR IGNORE INTO machine_properties
-                    (machine, key, value)
-    };
-    my (@values, @params);
-    foreach (argv2props()) {
-        push @values, q{
-                    (?,         ?,   ?)
-        };
-        push @params, ($mid, @$_);
+    orient();
+    my @paths = argv_pathlist();
+    usage() if !@ARGV;
+    $app->_transact(sub {
+        foreach my $path (@paths) {
+            $app->set($path, @ARGV);
+        }
+    });
+}
+
+sub cmd_append {
+    orient();
+    my $path = argv_path();
+    $app->append($path, @ARGV);
+    #my @props = argv_props(OP_SET);
+    #$app->append($path, @props);
+}
+
+sub cmd_rm {
+    my $recurse;
+    orient(
+        'r|recurse' => \$recurse,
+    );
+    usage if @ARGV == 0;
+    if ($recurse) {
+        my (%seen, @rm);
+        $app->walk(sub {
+            my ($obj, $level, @children) = @_;
+            unshift @rm, $obj if !$seen{$obj->{'id'}}++;
+        }, @ARGV);
+        $app->remove(@rm);
+        1;
     }
-    substr($values[0], 12, 6) = 'VALUES';
-    $sql .= join(",\n", @values);
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
+    else {
+        $app->remove($app->object($_)) for @ARGV;
+    }
+}
+
+
+sub cmd_ls {
+    my ($long, $full);
+    orient(
+        'l|long' => \$long,
+        'f|full-path' => \$full,
+    );
+    @ARGV = qw(/) if !@ARGV;
+    foreach my $path (@ARGV) {
+        my $obj = $app->object($path);
+        my @objects = $app->children($obj);
+        foreach my $obj (@objects) {
+            my $name = $obj->{'path'};
+            $name =~ s{.+/}{} if !$full;
+            if ($long) {
+                printf "%6d %s\n", $obj->{'id'}, $name;
+            }
+            else {
+                print $name, "\n";
+            }
+        }
+    }
+}
+
+sub cmd_tree {
+    orient();
+    usage if @ARGV > 1;
+    @ARGV = qw(/) if !@ARGV;
+    $app->walk(sub {
+        my ($obj, $level, @children) = @_;
+        my ($id, $path) = @$obj{qw(id path)};
+        (my $name = $path) =~ s{.*/(?=.)}{};
+        print '  ' x $level, $name;
+        print '/' if @children && $path ne '/';
+        print "\n";
+    }, @ARGV);
 }
 
 sub cmd_get {
-    my $usage = 'get MACHINE [KEY[=VALUE]...]';
-    getopts() or usage($usage);
-    opendb($dbfile);
-    usage($usage) if @ARGV < 1;
-    my $mach = shift @ARGV;
-    my $mid = machine_id($mach)
-        or fatal "no such machine: $mach";
-    my @props = machine_properties($mid, @_);
+    my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0 );
+    orient(
+        'h|header' => \$opt{'header'},
+        'p|path' => \$opt{'path'},
+        'k|keys' => \$opt{'keys'},
+    );
+    my $path = argv_path();
+    my $obj = $app->object($path);
+    my @props = $app->get($obj);
+    if (@ARGV) {
+        my %want = map { $_ => 1 } @ARGV;
+        @props = grep { $want{$_->[0]} } @props;
+        $opt{'sort'} = [ @ARGV ];
+    }
+    else {
+        $opt{'keys'} = 1;
+    }
+    _dump_object($obj, \%opt, @props);
+}
+
+sub cmd_export {
+    # TODO: sort by id to ensure ref integrity when importing!!
+    orient();
+    @ARGV = qw(/) if !@ARGV;
+    my $n = 0;
+    $app->walk(sub {
+        my ($obj, $level, @children) = @_;
+        print "\n" if $n++;
+        _dump_object($obj, { 'header' => 1, 'keys' => 1 }, $app->get($obj));
+    }, @ARGV);
+###     foreach my $k (sort keys %$obj) {
+###         my $v = $obj->{$k} // next;
+###         printf "#%s=%s\n", $k, $v if $k ne 'path';
+###     }
+###     my @props = $app->get($obj);
+###     foreach (@props) {
+###         my ($k, $v) = @$_;
+###         printf "%s=%s\n", $k, $v;
+###     }
+###     print "\n";
+### }, @ARGV);
+}
+
+sub _dump_object {
+    my ($obj, $opt, @props) = @_;
+    if ($opt->{'header'}) {
+        my $path = $obj->{'path'};
+        print $path, "\n";
+        foreach my $k (sort keys %$obj) {
+            my $v = $obj->{$k} // next;
+            printf "#%s=%s\n", $k, $v if $k ne 'path';
+        }
+    }
+    elsif ($opt->{'path'}) {
+        my $path = $obj->{'path'};
+        print $path, "\n";
+    }
+    if ($opt->{'sort'} and my @sort = @{ $opt->{'sort'} }) {
+        my $i = 0;
+        my %order = map { $_ => $i++ } @sort;
+        @props = sort { $order{$a->[0]} <=> $order{$b->[0]} } @props;
+    }
     foreach (@props) {
         my ($k, $v) = @$_;
-        if (@_ == 1) {
-            print $v, "\n";
+        if (ref $v) {
+            ($k, $v) = ('@'.$k, $v->{'path'});
+        }
+        if ($opt->{'keys'}) {
+            printf "%s=%s\n", $k, $v;
         }
         else {
-            print "$k $v\n";
+            print $v, "\n";
         }
     }
 }
 
-sub cmd_on {
-    my $usage = 'on MACHINE [ls|add|rm|set] [ARG...]';
-    getopts() or usage($usage);;
-    opendb($dbfile);
-    usage($usage) if @ARGV < 1;
-    my $mach = shift @ARGV;
-    @ARGV = qw(ls) if !@ARGV;
-    my $verb = shift @ARGV;
-    @_ = ($mach, @ARGV);
-    goto &{ __PACKAGE__->can('on_machine_'.$verb) || usage($usage) };
+sub cmd_bind {
+    orient();
+    usage if @ARGV != 2;
+    my $name = shift @ARGV;
+    my $path = argv_path();
+    usage if $name !~ /^[@]?([A-Za-z]\w*)$/;
+    $app->bind($1, $app->object($path));
 }
 
-sub cmd_add {
-    usage('add MACHINE [KEY=VALUE...]') if @ARGV < 1;
-    my $mach = shift @ARGV;
-    opendb($dbfile);
-    my $mid = add_machine($mach);
-    my @props = argv2props();
-    my %prop;
-    foreach (@props) {
-        my ($k, $v) = @$_;
-        push @{ $prop{$k} ||= [] }, $v;
+sub cmd_bound {
+    orient();
+    if (@ARGV == 1) {
+        my ($what) = @ARGV;
+        my @whats = $what =~ m{^/} ? $app->bound(undef, $what) : $app->bound($what, undef);
+        print $_, "\n" for @whats;
     }
-    my $sql = q{
-        INSERT INTO machine_properties
-                    (machine, key, value)
+    elsif (@ARGV == 2) {
+        my ($name, $path) = @ARGV;
+        if (!$app->bound($name, $path)) {
+            exit 3;
+        }
+    }
+    else {
+        usage;
+    }
+}
+
+sub cmd_import {
+    my $commit_interval = 100;
+    orient(
+        'i|commit-every=i' => \$commit_interval,
+    );
+    local $/ = '';
+    my $n = 0;
+    eval {
+        $app->begin;
+        while (<>) {
+            # Format:
+            #   /path/to/object
+            #   key=val
+            #   ...
+            #   (blank line)
+            $n++;
+            local @ARGV = grep { !/^#/ } split /\n/;
+            my $path = argv_path();
+            my $obj = $app->insert_or_update($path, @ARGV);
+            print $obj->{'id'}, ' ', $path, "\n";
+            if (($n % $commit_interval) == 0) {
+                $app->end;
+                $app->begin;
+            }
+        }
+        $app->end;
+        exit 0;
     };
-    my (@values, @params);
-    foreach (argv2props()) {
-        push @values, q{
-                    (?,         ?,   ?)
-        };
-        push @params, ($mid, @$_);
-    }
-    substr($values[0], 12, 6) = 'VALUES';
-    $sql .= join(",\n", @values);
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
+    $app->rollback;
+    fatal "commit failed";
 }
 
-sub add_machine {
-    my ($mach) = @_;
-    my $sth = $dbh->prepare(q{
-        INSERT INTO machines (name)
-        VALUES               (?   )
-    });
-    $sth->execute($mach);
-    my $mid = $dbh->last_insert_id("","","","");
-    return $mid;
+sub cmd_descend {
+    orient();
+    foreach my $path (@ARGV) {
+        print $_->{'path'}, "\n" for $app->descendants($path);
+    }
 }
+
+sub cmd_find {
+    my $start = '/';
+    orient(
+        's|start=s' => \$start,
+    );
+    @ARGV = ($start), goto &cmd_descend if !@ARGV;
+    my @objects = $app->find($start, @ARGV);
+    foreach my $obj (@objects) {
+        print $obj->{'path'}, "\n";
+    }
+}
+
 
 # --- Other functions
 
-sub dbfile {
-    return "$root/sw.db";
-}
-
-sub opendb {
-    my ($dbfile) = @_;
-    if (!defined $dbh) {
-        $dbh = DBI->connect("dbi:SQLite:dbname=$dbfile", '', '');
-        $dbh->{RaiseError} = 1;
-    }
-}
-
-sub machines {
-    my $sth = $dbh->prepare(q{
-        SELECT  *
-        FROM    machines
-        ORDER   BY name
-    });
-    $sth->execute;
-    my @machs;
-    while (my $mach = $sth->fetchrow_hashref) {
-        push @machs, $mach;
-    }
-    return @machs;
-}
-
-sub on_machine_ls {
-    my ($mach) = @_;
-    my @apps = instances_on_machine($mach);
-    foreach my $inst (@apps) {
-        my ($name, $qual) = @$inst{qw(name qualifier)};
-        $name .= ':' . $qual if defined $qual;
-        print $name, "\n";
-        next;
-        my @parts = ($name);
-        push @parts, '#'.$qual if defined $qual;
-        print "@parts\n";
-    }
-}
-
-sub on_machine_add {
-    my $usage = 'on MACHINE add APPLICATION[:QUALIFIER] [KEY=VALUE...]';
-    usage($usage) if @_ < 2;
-    opendb($dbfile);
-    # --- Parse arguments
-    my $mach = shift;
-    my ($app, $qual) = appqual(shift());
-    my @props = argv2props(@_);
-    # --- Get the machine ID
-    my $mid = machine_id($mach)
-        or fatal "no such machine: $mach";
-    # --- Get the application ID
-    my $aid = application_id($app);
-    if (!defined $aid) {
-        $aid = add_application($app);
-    }
-    # --- Insert the instance
-    my $sth_install = $dbh->prepare(q{INSERT OR IGNORE INTO instances (machine, application, qualifier) VALUES (?, ?, ?)});
-    $sth_install->execute($mid, $aid, $qual);
-    my $iid = $dbh->last_insert_id("","","","");
-    # --- Insert the specified properties
-    if (@props) {
-        my $sql_props = q{
-            INSERT OR IGNORE INTO instance_properties
-                    (instance, key, value)
-        };
-        my (@values, @params);
-        foreach (@props) {
-            push @values, q{
-                    (?,         ?,   ?)
-            };
-            push @params, ($iid, @$_);
-        }
-        substr($values[0], 12, 6) = 'VALUES';
-        $sql_props .= join(",\n", @values);
-        my $sth_props = $dbh->prepare($sql_props);
-        $sth_props->execute(@params);
-    }
-}
-
-sub machine_id {
-    my ($mach) = @_;
-    my $sth = $dbh->prepare(q{SELECT id FROM machines WHERE lower(name) = lower(?)});
-    $sth->execute($mach);
-    my ($mid) = $sth->fetchrow_array;
-    $sth->finish;
-    return $mid;
-}
-
-sub application_id {
-    my ($app) = @_;
-    my $sth = $dbh->prepare(q{SELECT id FROM applications WHERE lower(name) = lower(?)});
-    $sth->execute($app);
-    my ($aid) = $sth->fetchrow_array;
-    $sth->finish;
-    return $aid;
-}
-
-sub add_application {
-    my ($app) = @_;
-    my $sth = $dbh->prepare(q{INSERT INTO applications (name) VALUES (?)});
-    $sth->execute($app);
-    return $dbh->last_insert_id("","","","");
-}
-
-sub appqual {
-    my ($app, $qual) = @_;
-    $qual = $1 if $app =~ s{:([^:]+)$}{};
-    return ($app, $qual);
-}
-
-sub appqual2str {
-    my ($app, $qual) = @_;
-    $app .= ':' . $qual if defined $qual;
-    return $app;
-}
-
-sub on_machine_set {
-    my $usage = 'on MACHINE set APPLICATION[:QUALIFIER] [KEY=VALUE...]';
-    usage($usage) if @_ < 3;
-    my $mach = shift;
-    my ($app, $qual) = appqual(shift());
-    my @props = argv2props(@_);
-    my @rm = map { defined $_->[1] ? () : ($_->[0]) } @props;
-    @props = grep { defined $_->[1] } @props;
-    my $iid = instance_id($mach, $app, $qual)
-        or fatal("no such instance on $mach: " . appqual2str($app, $qual));
-    # Set properties
-    if (@props) {
-        my $sql = q{
-            INSERT OR IGNORE INTO instance_properties
-                    (instance, key, value)
-        };
-        my @params;
-        my @values;
-        foreach (@props) {
-            my ($k, $v) = @$_;
-            push @values, q{
-                    (?,        ?,   ?    )
-            };
-            push @params, $iid, $k, $v;
-        }
-        substr($values[0], 8, 6) = 'VALUES';
-        $sql .= join(",\n", @values);
-        my $sth = $dbh->prepare($sql);
-        $sth->execute(@params);
-    }
-    # Delete undefined properties
-    if (@rm) {
-        my $sql = sprintf q{
-            DELETE  FROM instance_properties
-            WHERE   instance = ?
-            AND     key IN ( %s )
-        }, join(', ', map { '?' } @rm);
-        my $sth = $dbh->prepare($sql);
-        $sth->execute(@rm);
-    }
-}
-
-sub instance_id {
-    my ($mach, $app, $qual) = @_;
-    my $sql = q{
-        SELECT  i.id
-        FROM    instances i,
-                applications a,
-                machines m
-        WHERE   i.machine = m.id
-        AND     i.application = a.id
-        AND     lower(m.name) = lower(?)
-        AND     lower(a.name) = lower(?)
-    };
-    my @params = ($mach, $app);
-    if (!defined $qual) {
-        $sql .= q{
-        AND     qualifier IS NULL};
-    }
-    elsif ($qual ne '*') {
-        $sql .= q{
-        AND     qualifier = ?};
-        push @params, $qual;
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @iids;
-    while (my ($iid) = ($sth->fetchrow_array)) {
-        push @iids, $iid;
-    }
-    die "multiple matches: $mach ", appqual2str($app, $qual)
-        if @iids > 1;
-    return if !@iids;
-    return shift @iids;
-}
-
-sub on_machine_get {
-    my $mach = shift @_;
-    my $long;
-    if (@_ && $_[0] eq '-l') {
-        $long = 1;
-        shift;
-    }
-    usage() if @_ < 1;
-    my ($app, $qual) = appqual(shift @_);
-    my $iid = instance_id($mach, $app, $qual)
-        or fatal("no such instance on $mach: " . appqual2str($app, $qual));
-    my @props = instance_properties($iid, @_);
-    foreach (@props) {
-        my ($k, $v, $t) = @$_;
-        if (@_ == 1) {
-            print $v, "\n";
-        }
-        elsif ($long) {
-            printf "%-12s %-12s %s\n", $t, $k, $v;
-        }
-        else {
-            print "$k $v\n";
-        }
-    }
-}
-
-sub on_machine_addresses {
-    my ($mach) = @_;
-    my @addrs = machine_addresses($mach);
-    foreach (@addrs) {
-        print $_->{'address'}, "\n";
-    }
-}
-
-sub on_machine_hosts {
-    my ($mach) = @_;
-    my @hosts = machine_hosts($mach);
-    my %addr2host;
-    foreach (@hosts) {
-        $addr2host{$_->{'address'}}{$_->{'hostname'}} = 1;
-    }
-    foreach my $addr (sort keys %addr2host) {
-        my @hosts = sort keys %{ $addr2host{$addr} };
-        print join(' ', $addr, @hosts), "\n";
-    }
-}
-
-sub on_machine_howto {
-    my ($mach, $verb, $app, @etc) = @_;
-    # --- Get the machine ID
-    my $mid = machine_id($mach)
-        or fatal "no such machine: $mach";
-    # --- Get the application ID
-    my $aid = application_id($app)
-        or fatal "no such application on $mach: $app";
-    my $sql = q{
-        SELECT  value
-        FROM    instance_properties
-        AND     machine = ?
-        AND     application = ?
-        AND     key = concat('howto:', ?)
-    };
-    my $sth = $dbh->prepare($sql);
-    $sth->execute($mid, $aid, $verb);
-    while (my ($val) = $sth->fetchrow_array) {
-        print $val, "\n";
-    }
-}
-
-sub machine_properties {
-    my $mid = shift;
-    my $sql = q{
-        SELECT  key,
-                value
-        FROM    machine_properties
-        WHERE   machine = ?
-    };
-    my @params = ($mid);
-    if (@_) {
-        $sql .= sprintf q{
-        AND     key IN ( %s )}, join(', ', map { '?' } @_);
-        push @params, @_;
-    }
-    $sql .= q{
-        ORDER   BY key, value};
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @props;
-    while (my ($k, $v) = $sth->fetchrow_array) {
-        push @props, [$k, $v];
-    }
-    return @props;
-}
-
-sub instance_properties {
-    my $iid = shift;
-    my $key_limit_sql = sprintf q{
-        AND     p.key IN ( %s )},
-        join(', ', map { '?' } @_);
-    my $sql = q{
-        SELECT  p.key,
-                p.value,
-                'instance'
-        FROM    instance_properties p
-        WHERE   p.instance = ?
-    };
-    my @params = ($iid);
-    if (@_) {
-        $sql .= $key_limit_sql;
-        push @params, @_;
-    }
-    $sql .= q{
-        UNION ALL
-        SELECT  p.key,
-                p.value,
-                'application'
-        FROM    application_properties p,
-                applications a,
-                instances i
-        WHERE   p.application = a.id
-        AND     i.application = a.id
-        AND     i.id = ?};
-    push @params, $iid;
-    if (@_) {
-        $sql .= $key_limit_sql;
-        push @params, @_;
-    }
-    $sql .= q{
-        UNION ALL
-        SELECT  p.key,
-                p.value,
-                'iclass'
-        FROM    class_properties p,
-                classes c
-        WHERE   p.class = c.id
-        AND     c.name IN (
-                    SELECT  p.value
-                    FROM    instance_properties p
-                    WHERE   p.instance = ?
-                    AND     p.key = 'class'
-                )};
-    push @params, $iid;
-    if (@_) {
-        $sql .= $key_limit_sql;
-        push @params, @_;
-    }
-    $sql .= q{
-        UNION ALL
-        SELECT  p.key,
-                p.value,
-                'aclass'
-        FROM    class_properties p,
-                classes c
-        WHERE   p.class = c.id
-        AND     c.name IN (
-                    SELECT  p.value
-                    FROM    application_properties p,
-                            instances i
-                    WHERE   p.application = i.application
-                    AND     i.id = ?
-                    AND     key = 'class'
-                )};
-    push @params, $iid;
-    if (@_) {
-        $sql .= $key_limit_sql;
-        push @params, @_;
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @props;
-    my %seen;
-    while (my ($k, $v, $t) = $sth->fetchrow_array) {
-        push @props, [$k, $v, $t] if !$seen{"$k\n$v"}++;
-    }
-    ### foreach (instance_application_properties($iid, @_)) {
-    ###     my ($k, $v, $c) = @$_;
-    ###     push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    ### }
-    ### foreach (instance_class_properties($iid, @_)) {
-    ###     my ($k, $v, $c) = @$_;
-    ###     push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    ### }
-    return @props;
-}
-
-sub instance_class_properties {
-    my $iid = shift;
-    # Add class properties
-    my $sql = q{
-        SELECT  p.key,
-                p.value,
-                c.name
-        FROM    class_properties p,
-                classes c
-        WHERE   p.class = c.id
-        AND     c.name IN (
-                    SELECT  value
-                    FROM    instance_properties
-                    WHERE   instance = ?
-                    AND     key = 'class'
-                )
-    };
-    my @params = ($iid);
-    if (@_) {
-        $sql .= sprintf q{
-        AND     p.key IN ( %s )}, join(', ', map { '?' } @_);
-        push @params, @_;
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @props;
-    my %seen;
-    while (my ($k, $v) = $sth->fetchrow_array) {
-        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    }
-    return @props;
-}
-
-sub instance_application_properties {
-    my $iid = shift;
-    # Add application properties
-    my $sql = q{
-        SELECT  p.key,
-                p.value
-        FROM    application_properties p,
-                applications a,
-                instances i
-        WHERE   p.application = a.id
-        AND     i.application = a.id
-        AND     i.id = ?
-    };
-    my @params = ($iid);
-    if (@_) {
-        $sql .= sprintf q{
-        AND     p.key IN ( %s )}, join(', ', map { '?' } @_);
-        push @params, @_;
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @props;
-    my %seen;
-    while (my ($k, $v) = $sth->fetchrow_array) {
-        push @props, [$k, $v] if !$seen{"$k\n$v"}++;
-    }
-    return @props;
-}
-
-sub instance_classes {
-    my ($iid) = @_;
-    my $sql = q{
-        SELECT  value
-        FROM    instance_properties
-        WHERE   instance = ?
-        AND     key = 'class'
-        UNION ALL
-        SELECT  value
-        FROM    application_properties p,
-                applications a,
-                instances i
-        WHERE   p.application = a.id
-        AND     i.application = a.id
-        AND     p.key = 'class'
-        AND     i.id = ?
-    };
-    my $sth = $dbh->prepare($sql);
-    $sth->execute($iid, $iid);
-    my @classes;
-    while (my ($class) = $sth->fetchrow_array) {
-        my $cid = class_id($class) or next;
-        push @classes, $class;
-    }
-    return @classes;
-}
-
-sub instances_on_machine {
-    my ($mach) = @_;
-    my $sth = $dbh->prepare(q{
-        SELECT  a.name,
-                i.qualifier
-        FROM    instances i,
-                applications a,
-                machines m
-        WHERE   i.application = a.id
-        AND     i.machine = m.id
-        AND     lower(m.name) = lower(?)
-    });
-    $sth->execute($mach);
-    my @apps;
-    while (my $inst = $sth->fetchrow_hashref) {
-        push @apps, $inst;
-    }
-    return @apps;
-}
-
-sub instance_ports_on_machine {
-    my ($mach, $inst, $qual, $addr) = @_;
-    my $sql0 = q{
-        SELECT  p.port
-              , a.name
-              , i.qualifier
-    };
-    my $sql1 = q{
-        FROM    instance_ports p
-        INNER JOIN instances i ON p.app = i.id
-        INNER JOIN applications a ON i.application = a.id
-        INNER JOIN machines m ON i.machine = m.id
-    };
-    my $sql2 = q{
-        WHERE   p.app = i.id
-        AND     i.application = a.id
-        AND     i.machine = m.id
-        AND     lower(m.name) = lower(?)
-    };
-    my @params = ($mach);
-    if (defined $inst) {
-        $sql2 .= q{
-            AND     lower(a.name) = lower(?)
-        };
-        push @params, $inst;
-    }
-    if (defined $qual) {
-        $sql2 .= q{
-            AND     lower(i.qualifier) = lower(?)
-        };
-        push @params, $qual;
-    }
-    if (defined $addr) {
-        $sql0 .= q{
-              , ad.address
-        };
-        $sql1 .= q{
-            OUTER LEFT JOIN addresses ad ON ad.machine = machine.id
-        };
-        $sql2 .= q{
-            AND     lower(ad.address) = lower(?)
-        };
-        push @params, $addr;
-    }
-    my $sql = $sql0 . $sql1 . $sql2;
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
-    my @ports;
-    while (my $port = $sth->fetchrow_hashref) {
-        push @ports, $port;
-    }
-    return @ports;
-}
-
-sub argv2props {
-    my @props;
-    my $argv = @_ ? \@_ : \@ARGV;
-    while (@$argv) {
-        local $_ = shift @$argv;
-        die $_ if !m{^([^=]+)(?:=(.*)|!)$};
-        push @props, [$1, $2];
-    }
-    return @props;
-}
-
-sub getopts {
+sub orient {
+    return if $running;
     GetOptions(
-        'd|database=s' => \$dbfile,
+        'd|directory=s' => \$dir,
         @_,
     ) or usage;
+    chdir $dir or fatal "chdir $dir: $!";
+    $app = -e $dbfile ? App::sw->open($dbfile) : App::sw->create($dbfile);
+    $running = 1;
 }
 
-sub machine_addresses {
-    my ($mach) = @_;
-    my $sth = $dbh->prepare(q{
-        SELECT  a.address,
-                a.network
-        FROM    addresses a,
-                machines m
-        WHERE   a.machine = m.id
-        AND     lower(m.name) = lower(?)
-    });
-    $sth->execute($mach);
-    my @addrs;
-    while (my $row = $sth->fetchrow_hashref) {
-        push @addrs, $row;
-    }
-    return @addrs;
+sub subcmd {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    my @caller = caller 1;
+    $caller[3] =~ /(cmd_\w+)$/ or die;
+    goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
 }
 
-sub machine_hosts {
-    my ($mach) = @_;
-    my $sth = $dbh->prepare(q{
-        SELECT  a.address,
-                a.network,
-                h.hostname
-        FROM    addresses a,
-                machines m,
-                hostnames h
-        WHERE   a.machine = m.id
-        AND     h.address = a.id
-        AND     lower(m.name) = lower(?)
-    });
-    $sth->execute($mach);
-    my @addrs;
-    while (my $row = $sth->fetchrow_hashref) {
-        push @addrs, $row;
-    }
-    return @addrs;
+sub parse_prop {
+    local $_ = shift;
+    /^([^-+=~!]+)([-+!]?[=~])(.*)$/
+        or return [ OP_KEY, $_ ];
+    my ($k, $op, $v) = ($1, $2, $3);
+    return [ OP_SET,    $k, $v ] if $op eq '=';
+    return [ OP_APPEND, $k, $v ] if $op eq '+=';
+    return [ OP_REMOVE, $k, $v ] if $op eq '-=';
+    fatal "invalid operator $op in key-value pair: $_";
 }
 
-sub initdb {
-    my ($dbfile) = @_;
-    opendb($dbfile);
-    my @sql = split /;\n/, q{
-        CREATE TABLE machines (
-            id          INTEGER PRIMARY KEY,
-            name        VARCHAR UNIQUE NOT NULL
-        );
-        CREATE TABLE networks (
-            id          INTEGER PRIMARY KEY,
-            name        VARCHAR NOT NULL,
-            netmask     INTEGER NOT NULL
-        );
-        CREATE TABLE addresses (
-            id          INTEGER PRIMARY KEY,
-            ipversion   INTEGER NOT NULL DEFAULT 4,
-            address     VARCHAR,
-            machine     INTEGER NULL,
-            network     INTEGER NULL,
-            UNIQUE      (address, machine),
-            FOREIGN KEY (machine) REFERENCES machines(id)
-        );
-        CREATE TABLE hostnames (
-            id          INTEGER PRIMARY KEY,
-            hostname    VARCHAR NOT NULL,
-            address     INTEGER NOT NULL,
-            UNIQUE      (hostname, address),
-            FOREIGN KEY (address) REFERENCES addresses(id)
-        );
-        CREATE TABLE applications (
-            id          INTEGER PRIMARY KEY,
-            name        VARCHAR UNIQUE NOT NULL,
-            description VARCHAR NULL
-        );
-        CREATE TABLE application_properties (
-            application INTEGER NOT NULL,
-            key         VARCHAR NOT NULL,
-            value       VARCHAR,
-            UNIQUE      (application, key, value),
-            FOREIGN KEY (application) REFERENCES application(id)
-        );
-        CREATE TABLE instances (
-            id          INTEGER PRIMARY KEY,
-            machine     INTEGER NOT NULL,
-            application INTEGER NOT NULL,
-            qualifier   VARCHAR NULL,
-            UNIQUE      (machine, application, qualifier),
-            FOREIGN KEY (machine) REFERENCES machines(id)
-        );
-        CREATE TABLE instance_ports (
-            id          INTEGER PRIMARY KEY,
-            instance    INTEGER NOT NULL,
-            address     INTEGER NULL,
-            port        INTEGER NULL,
-            description VARCHAR,
-            UNIQUE      (instance, address, port),
-            FOREIGN KEY (instance) REFERENCES instances(id)
-        );
-        CREATE TABLE machine_properties (
-            machine     INTEGER NOT NULL,
-            key         VARCHAR NOT NULL,
-            value       VARCHAR,
-            UNIQUE      (machine, key, value),
-            FOREIGN KEY (machine) REFERENCES machines(id)
-        );
-        CREATE TABLE instance_properties (
-            instance    INTEGER NOT NULL,
-            key         VARCHAR NOT NULL,
-            value       VARCHAR,
-            UNIQUE      (instance, key, value),
-            FOREIGN KEY (instance) REFERENCES instances(id)
-        );
-        CREATE TABLE classes (
-            id          INTEGER PRIMARY KEY,
-            name        VARCHAR UNIQUE NOT NULL
-        );
-        CREATE TABLE class_properties (
-            class       INTEGER NOT NULL,
-            key         VARCHAR NOT NULL,
-            value       VARCHAR,
-            UNIQUE      (class, key, value),
-            FOREIGN KEY (class) REFERENCES classes(id)
-        );
-    };
-    foreach my $sql (@sql) {
-        $dbh->do($sql);
+sub argv_props {
+    my $modes = @_ ? shift() : ~0;
+    my @props = map { parse_prop($_) } @ARGV;
+    usage if grep { !($modes & $_->[0]) } @props;
+    return @props;
+}
+
+sub argv_path {
+    usage if !@ARGV;
+    path(shift @ARGV);
+}
+
+sub argv_pathlist {
+    my @list;
+    return argv_path() if $ARGV[0] ne '[';
+    shift @ARGV;
+    usage if !grep { $_ eq ']' } @ARGV;
+    while (@ARGV) {
+        my $arg = shift @ARGV;
+        last if $arg eq ']';
+        push @list, path($arg);
     }
+    return @list;
+}
+
+sub path {
+    my ($path) = @_;
+    $path =~ m{^/$|^(/\w[-.\w+]*)+$} or fatal "invalid object path: $path";
+    return $path;
+}
+
+sub prop_array {
+    return @_ if @_ > 1;
+    my ($prop) = @_;
+    my @list;
+    my %seen;
+    while (my ($k, $v) = each %$prop) {
+        next if !defined $v;
+        foreach (ref $v ? @$v : $v) {
+            $seen{$k}{$_} = 1;
+        }
+    }
+    while (my ($k, $v) = each %seen) {
+        push @list, map { [$k, $_] } keys %$v;
+    }
+    return @list;
+}
+
+sub fatal {
+    print STDERR "sw @_\n";
+    exit 2;
 }
 
 sub usage {
-    my $usage = @_ ? 'usage: sw ' . shift : 'usage: sw COMMAND [ARG...]';
-    print $_, "\n" for $usage, @_;
+    print STDERR "usage: sw COMMAND [ARG...]\n";
     exit 1;
 }
+
+package App::sw;
+
+use strict;
+use warnings;
+
+use DBI;
+
+use constant IS_REF    => 256;
+
+use constant OP_SET    => 1;
+use constant OP_APPEND => 2;
+use constant OP_REMOVE => 4;
+use constant OP_KEY    => 8;
+use constant OP_ANY    => ~IS_REF;
+
+my %op2int;
+
+sub new {
+    my $cls = shift;
+    unshift @_, 'file' if @_ % 2;
+    my %self = @_;
+    die "db file not specified" if !defined $self{'file'};
+    %op2int = (
+        '='  => OP_SET,
+        '+'  => OP_APPEND,
+        '+=' => OP_APPEND,
+        '-'  => OP_REMOVE,
+        '-=' => OP_REMOVE,
+        map { $_ => $_ } (
+            OP_SET,
+            OP_APPEND,
+            OP_REMOVE,
+        ),
+    ) if !keys %op2int;
+    bless \%self, $cls;
+}
+
+sub create {
+    my $proto = shift;
+    my $self = ref $proto ? $proto : $proto->new(@_);
+    my $file = $self->{'file'};
+    die "db file $file already exists" if -e $file;
+    return $self->connect($file)->initialize;
+}
+
+sub open {
+    my $proto = shift;
+    my $self = ref $proto ? $proto : $proto->new(@_);
+    my $file = $self->{'file'};
+    die "db file $file doesn't exist" if ! -e $file;
+    return $self->connect($file);
+}
+
+sub connect {
+    my ($self, $file) = @_;
+    my $dbh = $self->{'dbh'} = (DBI->connect("dbi:SQLite:dbname=$file",'','') or die "connect failed");
+    $dbh->do('pragma foreign_keys=on');
+    return $self;
+}
+
+sub initialize {
+    my ($self) = @_;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        $dbh->do($_) for _init_sql_statements();
+    });
+    return $self;
+}
+
+sub object {
+    my ($self, $obj) = @_;
+    return db_object($self->{'dbh'}, $obj);
+}
+
+sub insert {
+    my ($self, $path) = splice @_, 0, 2;
+    my @props = _props(OP_SET, @_);
+    my $obj;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        $obj = db_create_object($dbh, $path, @props);
+    });
+    return $obj;
+}
+
+sub insert_or_update {
+    my ($self, $path) = splice @_, 0, 2;
+    my $obj = eval {
+        $self->object($path);
+    };
+    if ($obj) {
+        $self->set($obj, @_);
+    }
+    else {
+        $obj = $self->insert($path, @_);
+    }
+    return $obj;
+}
+
+sub remove {
+    my ($self, @objects) = @_;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_remove_object($dbh, $_) for @objects;
+    });
+}
+
+sub bind {
+    my ($self, $name, $obj) = @_;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_bind($dbh, $name, $obj);
+    });
+}
+
+sub bound {
+    my ($self, $name, $obj) = @_;
+    my $dbh = $self->{'dbh'};
+    if (!defined $name) {
+        return db_bindings_to($dbh, $self->object($obj));
+    }
+    elsif (!defined $obj) {
+        return db_bindings_from($dbh, $name);
+    }
+    else {
+        return db_binding($dbh, $name, $obj);
+    }
+}
+        
+sub unbind {
+    my ($self, $name, $obj) = @_;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_unbind($dbh, $name);
+    });
+}
+
+sub get {
+    my $self = shift;
+    my $o = shift;
+    my $dbh = $self->{'dbh'};
+    my %want = map { $_ => 1 } @_;
+    my @props = grep { !%want || $want{$_->[1]} } db_get_properties($self->{'dbh'}, $o);
+    return map {
+        my ($op, $k, $v) = @$_;
+        $op & IS_REF
+            ? [ $k, db_object($dbh, $v) ]
+            : [ $k, $v                  ]
+    } @props;
+}
+
+sub set {
+    my $self = shift;
+    my $o = shift;
+    my @props = _props(OP_SET|OP_APPEND|OP_REMOVE, @_);
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_set_properties($dbh, $o, @props);
+    });
+}
+
+sub append {
+    my $self = shift;
+    my $o = shift;
+    my @props = _props(OP_SET, @_);
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_insert_properties($dbh, $o, @props);
+    });
+}
+
+sub children {
+    my ($self, $obj) = @_;
+    my $dbh = $self->{'dbh'};
+    my @children = db_get_children($dbh, $obj);
+    return @children;
+}
+
+sub descendants {
+    my ($self, $obj) = @_;
+    my $dbh = $self->{'dbh'};
+    my @children = db_get_descendants($dbh, $obj);
+    return @children;
+}
+
+sub find {
+    my ($self, $o) = splice @_, 0, 2;
+    my $dbh = $self->{'dbh'};
+    return db_find_objects($dbh, $o, _props(OP_SET|OP_KEY, @_));
+}
+
+sub walk {
+    my ($self, $proc, @roots) = @_;
+    @roots = ('/') if !@roots;
+    my $walker;
+    my $level = 0;
+    my $dbh = $self->{'dbh'};
+    $walker = sub {
+        my ($obj) = @_;
+        my @children = db_get_children($dbh, $obj);
+        $proc->($obj, $level, @children);
+        $level++;
+        $walker->($_) for @children;
+        $level--;
+    };
+    $walker->($self->object($_)) for @roots;
+}
+
+sub begin {
+    my ($self) = @_;
+    my $dbh = $self->{'dbh'};
+    $dbh->begin_work if !$self->{'txlevel'}++;
+}
+
+sub end {
+    my ($self) = @_;
+    my $dbh = $self->{'dbh'};
+    $dbh->commit if !--$self->{'txlevel'};
+}
+
+sub cancel {
+    my ($self) = @_;
+    my $dbh = $self->{'dbh'};
+    $dbh->rollback;
+    --$self->{'txlevel'};
+}
+
+# --- Private methods
+
+sub _transact {
+    my ($self, $sub) = @_;
+    my $dbh = $self->{'dbh'};
+    my $ok;
+    eval {
+        $dbh->begin_work if !$self->{'txlevel'}++;
+        $sub->($dbh);
+        $dbh->commit if !--$self->{'txlevel'};
+        $ok = 1;
+    };
+    return $self if $ok;
+    my $errstr = $dbh->errstr;
+    $dbh->rollback;
+    die;
+}
+
+# --- Database operations
+
+sub db_create_object {
+    my ($dbh, $path, @props) = @_;
+    my @anc = _ancestor_paths($path);
+    shift @anc;
+    my $poid = 1;  # root
+    while (@anc) {
+        my $p = eval { db_object($dbh, $anc[0]) } or last;
+        shift @anc;
+        $poid = $p->{'id'};
+    }
+    my $sql = 'INSERT INTO objects (path, parent) VALUES (?, ?)';
+    my $sth = $dbh->prepare($sql);
+    foreach my $apath (@anc) {
+        $sth->execute($apath, $poid);
+        $poid = $dbh->sqlite_last_insert_rowid;
+    }
+    $sth->execute($path, $poid);
+    my $obj = {
+        'path' => $path,
+        'id' => $dbh->sqlite_last_insert_rowid,
+    };
+    $sth->finish;
+    db_insert_properties($dbh, $obj, @props) if @props;
+    return $obj;
+}
+
+sub db_remove_object {
+    my ($dbh, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my @children = db_get_children($dbh, $o);
+    die "object $oid has children" if @children;
+    $dbh->do('DELETE FROM properties WHERE object = ? OR ref = ?', {}, $oid, $oid);
+    $dbh->do('DELETE FROM bindings WHERE ref = ?', {}, $oid);
+    $dbh->do('DELETE FROM objects WHERE id = ?', {}, $oid);
+}
+
+sub db_set_properties {
+    my ($dbh, $o, @props) = @_;
+    my @del = grep { $_->[0] & (OP_SET|OP_REMOVE) } @props;
+    my @add = grep { $_->[0] & (OP_SET|OP_APPEND) } @props;
+    $o = db_object($dbh, $o) if ref($o) eq '' && $o !~ /^[0-9]+$/;
+    db_remove_properties($dbh, $o, @del) if @del;
+    db_insert_properties($dbh, $o, @add) if @add;
+}
+
+sub db_insert_properties {
+    my ($dbh, $o, @props) = @_;
+    return if !@props;
+    my $oid = db_oid($dbh, $o);
+    my @refs = grep {   $_->[0] & IS_REF  } @props;
+    my @vals = grep { !($_->[0] & IS_REF) } @props;
+    if (@refs) {
+        my $sth = $dbh->prepare(
+            sprintf 'INSERT INTO properties (object, key, ref) VALUES %s',
+                join(', ', map { sprintf '(?, ?, ?)' } @refs)
+        );
+        $sth->execute(map { $oid, $_->[1], db_object($dbh, $_->[2])->{'id'} } @refs);
+        $sth->finish;
+    }
+    if (@vals) {
+        my $sth = $dbh->prepare(
+            sprintf 'INSERT INTO properties (object, key, val) VALUES %s',
+                join(', ', map { sprintf '(?, ?, ?)' } @vals)
+        );
+        $sth->execute(map { $oid, @$_[1,2] } @vals);
+        $sth->finish;
+    }
+}
+
+sub db_remove_properties {
+    my ($dbh, $o, @props) = @_;
+    return if !@props;
+    my $oid = db_oid($dbh, $o);
+    my @criteria;
+    my @params = ($oid);
+    foreach (@props) {
+        my ($op, $k, $v) = @$_;
+        $op = OP_KEY if !defined $v && $op & OP_REMOVE;
+        if ($op & (OP_SET|OP_REMOVE)) {
+            if ($op & IS_REF) {
+                push @criteria, '(key = ? AND ref IN (SELECT id FROM objects WHERE path = ?))';
+            }
+            else {
+                push @criteria, '(key = ? AND val = ?)';
+            }
+            push @params, $k, $v;
+        }
+        elsif ($op & OP_KEY) {
+            push @criteria, 'key = ?';
+            push @params, $k;
+        }
+    }
+    my $sql = sprintf 'DELETE FROM properties WHERE object = ? AND ( %s )',
+        join(' OR ', @criteria);
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    $sth->finish;
+}
+
+#sub db_ensure_object {
+#    my ($dbh, $path) = @_;
+#    my $sth = $dbh->prepare('INSERT OR IGNORE INTO objects (path) VALUES (?)');
+#    $sth->execute($path);
+#    $sth->finish;
+#}
+
+sub db_bind {
+    my ($dbh, $name, $obj) = @_;
+    my $sth = $dbh->prepare('INSERT OR REPLACE INTO bindings(name, ref) VALUES (?, ?)');
+    $sth->execute($name, db_object($dbh, $obj)->{'id'});
+}
+
+sub db_unbind {
+    my ($dbh, $name) = @_;
+    my $sth = $dbh->prepare('DELETE FROM bindings WHERE name = ?');
+    $sth->execute($name);
+}
+
+sub db_bindings_from {
+    my ($dbh, $name) = @_;
+    my $sth = $dbh->prepare('SELECT ref FROM bindings WHERE name = ?');
+    $sth->execute($name);
+    my @paths;
+    while (my ($ref) = $sth->fetchrow_array) {
+        push @paths, db_path($dbh, $ref);
+    }
+    return @paths;
+}
+
+sub db_bindings_to {
+    my ($dbh, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $sth = $dbh->prepare('SELECT name FROM bindings WHERE ref = ?');
+    $sth->execute($oid);
+    my @names;
+    while (my ($name) = $sth->fetchrow_array) {
+        push @names, $name;
+    }
+    return @names;
+}
+
+sub db_binding {
+    my ($dbh, $name, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $sth = $dbh->prepare('SELECT 1 FROM bindings WHERE name = ? AND ref = ?');
+    $sth->execute($name, $oid);
+    my ($bound) = $sth->fetchrow_array;
+    return !!$bound;
+}
+
+sub db_object {
+    my ($dbh, $o) = @_;
+    return $o if ref $o;
+    my ($sth, @params);;
+    if ($o =~ m{^/}) {
+        $sth = $dbh->prepare('SELECT id, path, parent FROM objects WHERE path = ?');
+        @params = ($o);
+    }
+    elsif ($o =~ m{^[1-9][0-9]*$}) {
+        $sth = $dbh->prepare('SELECT id, path, parent FROM objects WHERE id = ?');
+        @params = ($o);
+    }
+    elsif ($o =~ m{^[@]([A-Za-z]\w*)$}) {
+        @params = ($1);
+        $sth = $dbh->prepare(q{
+            SELECT  o.id, o.path, o.parent
+            FROM    objects o JOIN bindings b ON o.id = b.ref
+            WHERE   b.name = ?
+        });
+    }
+    elsif ($o =~ m{^[@]([A-Za-z]\w*)(/.+)$}) {
+        @params = ($1, $2);
+        $sth = $dbh->prepare(q{
+            SELECT  o2.id, o2.path, o2.parent
+            FROM    objects o1, objects o2, bindings b
+            WHERE   o1.id = b.ref
+            AND     b.name = ?
+            AND     o2.path = o1.path || ?
+        });
+    }
+    else {
+        die "unrecognized object: $o";
+    }
+    $sth->execute(@params);
+    my $obj = $sth->fetchrow_hashref;
+    $sth->finish;
+    die "no such object: $o" if !$obj;
+    return $obj;
+}
+
+sub db_oid {
+    my ($dbh, $o) = @_;
+    return $o->{'id'} if ref $o;
+    return $o if $o =~ /^[1-9][0-9]*$/;
+    return db_object($dbh, $o)->{'id'};
+}
+
+sub db_path {
+    my ($dbh, $o) = @_;
+    return $o->{'path'} if ref $o;
+    return $o if $o =~ m{^/};
+    return db_object($dbh, $o)->{'path'};
+}
+
+sub db_get_properties {
+    my ($dbh, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $sth = $dbh->prepare('SELECT key, val, ref FROM properties WHERE object = ? ORDER BY key, val, ref');
+    $sth->execute($oid);
+    my @props;
+    while (my ($k, $v, $r) = $sth->fetchrow_array) {
+        if ($r) {
+            push @props, [ OP_SET|IS_REF, $k, $r ];
+        }
+        elsif (defined $v) {
+            push @props, [ OP_SET, $k, $v ];
+        }
+    }
+    $sth->finish;
+    return @props;
+}
+
+sub db_get_children {
+    my ($dbh, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $sth = $dbh->prepare('SELECT * FROM objects WHERE parent = ?');
+    $sth->execute($oid);
+    my @children;
+    while (my $child = $sth->fetchrow_hashref) {
+        push @children, $child;
+    }
+    $sth->finish;
+    return @children;
+}
+
+sub db_get_descendants {
+    my ($dbh, $o) = @_;
+    my $obj = db_object($dbh, $o);
+    my $path = $obj->{'path'};
+    my $sql = q{SELECT id, path FROM objects WHERE path LIKE ? ORDER BY path};
+    my $sth = $dbh->prepare($sql);
+    $path =~ s{^/+$}{};
+    $sth->execute($path . '/_%');
+    my @descendants;
+    while (my $obj = $sth->fetchrow_hashref) {
+        push @descendants, $obj;
+    }
+    $sth->finish;
+    return @descendants;
+}
+
+sub db_get_bindings {
+    my ($dbh, $o) = @_;
+    my $obj = db_object($dbh, $o);
+    my $sth = $dbh->prepare('SELECT name FROM bindings WHERE ref = ?');
+    $sth->execute($obj->{'id'});
+    my @names;
+    while (my ($name) = $sth->fetchrow_array) {
+        push @names, $name;
+    }
+    return @names;
+}
+
+sub db_find_objects {
+    my $dbh = shift;
+    my $root = db_object($dbh, shift);
+    my (@parts, @params);
+    foreach (@_) {
+        my ($op, $k, $v) = @$_;
+        if ($op & OP_SET) {
+            if ($op & IS_REF) {
+                push @parts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
+                push @params, $k, $v;
+            }
+            else {
+                push @parts, '(p.key = ? AND p.val = ?)';
+                push @params, $k, $v;
+            }
+        }
+        elsif ($op & OP_KEY) {
+            push @parts, '(p.key = ?)';
+            push @params, $k;
+        }
+    }
+    my $start = $root->{'path'};
+    my $sql = sprintf 'SELECT o.id, o.path, o.parent, p.key FROM objects o INNER JOIN properties p ON o.id = p.object WHERE %s',
+        join(' OR ', @parts);
+    if ($start ne '/') {
+        $sql .= ' AND o.path LIKE ?';
+        push @params, $start . '%';
+    }
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my %match;
+    my %object;
+    while (my ($oid, $path, $parent, $key) = $sth->fetchrow_array) {
+        $match{$oid}{$key}++;
+        $object{$oid} ||= { 'id' => $oid, 'path' => $path, 'parent' => $parent };
+    }
+    my @objects;
+    while (my ($oid, $matched) = each %match) {
+        delete $object{$oid} if scalar(keys %$matched) != @parts;
+    }
+    return values %object;
+}
+
+# --- Functions
+
+sub _init_sql_statements {
+    split /;\n/, <<'EOS';
+CREATE TABLE objects (
+    id          INTEGER NOT NULL UNIQUE PRIMARY KEY,
+    path        VARCHAR NOT NULL UNIQUE,
+    parent      INTEGER NULL REFERENCES objects(id) ON DELETE CASCADE
+);
+CREATE TABLE properties (
+    object      INTEGER NOT NULL,
+    key         VARCHAR NOT NULL,
+    val         VARCHAR,
+    ref         INTEGER NULL REFERENCES objects(id) ON DELETE CASCADE
+);
+CREATE TABLE bindings (
+    name        VARCHAR NOT NULL UNIQUE PRIMARY KEY,
+    ref         INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX objects_path_idx ON objects (path);
+CREATE INDEX properties_obj_key_idx  ON properties (object, key);
+CREATE INDEX properties_key_idx      ON properties (key);
+CREATE INDEX properties_key_val_idx  ON properties (key, val);
+CREATE INDEX properties_key_ref_idx  ON properties (key, ref);
+CREATE INDEX bindings_name_idx       ON bindings (name);
+INSERT INTO objects (id, path) VALUES (1, '/');
+EOS
+}
+
+sub _props {
+    my $modes = shift() || OP_ANY;
+    my @props;
+    while (@_) {
+        my $x = shift @_;
+        my $r = ref $x;
+        if ($r eq '' && $x =~ /^([-+])?([@])?([A-Za-z0-9][-:._A-Za-z0-9]*)(?:=(.*))?$/) {
+            my ($op, $k, $v) = ($op2int{$1||'='}, $3, $4);
+            die if !($op & $modes);
+            $op |= IS_REF if $2;
+            if (!defined $v) {
+                if ($op & OP_REMOVE) {
+                    push @props, [ $op, $k ];
+                }
+                elsif ($modes & OP_KEY) {
+                    push @props, [ OP_KEY, $k ];
+                }
+                else {
+                    die if !@_;
+                    $v = shift @_;
+                    die if ref($v) ne '' && ref($v) ne 'ARRAY';
+                    push @props, ref($v) eq 'ARRAY' ? map { [ $op, $k, $_ ] } @$v : [ $op, $k, $v ];
+                }
+            }
+            else {
+                push @props, [ $op, $k, $v ];
+            }
+        }
+        elsif ($r eq 'ARRAY') {
+            my ($op, $k, $v) = @$x;
+            $op = $op2int{$op} || die "unrecognized op: $op";
+            die if !($op & $modes);
+            push @props, [ $op, $k, $v ];
+        }
+        elsif ($r eq 'HASH') {
+            while (my ($k, $v) = each %$x) {
+                my $op = ($k =~ s/^([+-])//) ? $op2int{$1} : OP_SET;
+                die if !($op & $modes);
+                push @props, ref($v) eq 'ARRAY' ? map { [ $op, $k, $_ ] } @$v : [ $op, $k, $v ];
+            }
+        }
+        else {
+            die;
+        }
+    }
+    return @props;
+}
+
+sub _props_old {
+    my $modes = shift() || OP_ANY;  # XXX Treat 0 as ~0
+    my @props;
+    foreach my $prop (@_) {
+        $prop = _parse_prop($prop) if !ref $prop;
+        die "not a permitted prop mode: $prop->[0]" if !($modes & $_->[0]);
+        push @props, $prop;
+    }
+    return @props;
+}
+
+sub _parse_prop {
+    local $_ = shift;
+    /^([^-+=~!]+)([-+!]?[=~])(.*)$/
+        or return [ OP_KEY, $_ ];
+    my ($k, $op, $v) = ($1, $2, $3);
+    return [ OP_SET,    $k, $v ] if $op eq '=';
+    return [ OP_APPEND, $k, $v ] if $op eq '+=';
+    return [ OP_REMOVE, $k, $v ] if $op eq '-=';
+    die "invalid operator $op in key-value pair: $_";
+}
+
+sub _ancestor_paths {
+    local $_ = shift;
+    return if $_ eq '/';
+    my @anc;
+    while (s{(?<=.)/[^/]+$}{}) {
+        push @anc, $_;
+    }
+    return ('/', reverse @anc);
+}
+
+sub init_plugins {
+    my ($cls, $dir) = @_;
+    foreach my $f (glob($dir . '/*.pm')) {
+        warning("invalid plugin file name: $f"), next
+            if $f !~ m{/([a-z]+)\.pm$};
+        my ($name, $cls) = ($1, "App::sw::Plugin::$1");
+        my $ok = eval {
+            require $f;
+            my $plugin = $cls->new('sw' => $app);
+            my %c = eval { $plugin->commands };
+            my %h = eval { $plugin->hooks };
+            while (my ($cmd, $sub) = each %c) {
+                die "plugin $name provides command $cmd but it is already provided"
+                    if exists $command{$cmd};
+                $command{$cmd} = sub { $sub->(@ARGV) };
+            }
+            while (my ($hook, $sub) = each %h) {
+                die "plugin $name provides hook $hook but it is already provided"
+                    if exists $hook{$hook};
+                $hook{$hook} = $sub;
+            }
+            1;  # OK
+        };
+        die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
+    }
+}
+# --- Testing code
+
+sub test {
+    my $dbfile = @ARGV ? shift @ARGV : 'test.db';
+    my $app;
+    if (-e $dbfile) {
+        $app = App::sw->open($dbfile);
+    }
+    else {
+        $app = App::sw->create($dbfile);
+        $app->insert('/user/fishwick',
+            'name' => 'Ulysses K. Fishwick',
+            'age' => '3',
+            'nick' => 'fishwick',
+        );
+        $app->bind('fishwick', '/user/fishwick');
+        $app->insert('/user/fishwick/home/foo',
+            'foo' => 'bar',
+            'friend' => 'sid',
+            'friend' => 'nancy',
+        );
+        1;
+    }
+    @ARGV = ('@fishwick/home/foo') if !@ARGV;
+    foreach (@ARGV) {
+        my $obj = $app->object($_);
+        my @props = $app->get($obj);
+        print $obj->{'path'}, "\n";
+        foreach (@props) {
+            print join('=', @$_), "\n";
+        }
+        print "\n";
+    }
+}
+
