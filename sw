@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 
+use FindBin qw($RealScript);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -46,7 +47,7 @@ sub cmd_help {
 }
 
 sub cmd_init {
-    #@ init [DIR] :: initialize an sw database
+    #@ init [DIR] :: initialize a new database
     usage if @ARGV > 1;
     @ARGV = qw(.) if !@ARGV;
     ($dir) = @ARGV;
@@ -59,6 +60,7 @@ sub cmd_init {
 }
 
 sub cmd_dbi {
+    #@ dbi :: open database using sqlite3
     orient();
     usage if @ARGV;
     undef $app;
@@ -82,6 +84,9 @@ sub cmd_dbi {
 ### }
 
 sub cmd_add {
+    #@ add PATH [KEY=VAL]...
+    #@ add '[' PATH... ']' [KEY=VAL]...
+    #= add a node
     orient();
     $app->_transact(sub {
         foreach my $path (argv_pathlist()) {
@@ -91,6 +96,9 @@ sub cmd_add {
 }
 
 sub cmd_set {
+    #@ set PATH KEY=VAL...
+    #@ set '[' PATH... ']' KEY=VAL...
+    #= set node properties
     orient();
     my @paths = argv_pathlist();
     usage() if !@ARGV;
@@ -102,6 +110,7 @@ sub cmd_set {
 }
 
 sub cmd_append {
+    #@ append PATH KEY=VAL...
     orient();
     my $path = argv_path();
     $app->append($path, @ARGV);
@@ -110,6 +119,7 @@ sub cmd_append {
 }
 
 sub cmd_rm {
+    #@ rm [-r] PATH...
     my $recurse;
     orient(
         'r|recurse' => \$recurse,
@@ -131,6 +141,7 @@ sub cmd_rm {
 
 
 sub cmd_ls {
+    #@ ls [-lf] [PATH...]
     my ($long, $full);
     orient(
         'l|long' => \$long,
@@ -154,6 +165,7 @@ sub cmd_ls {
 }
 
 sub cmd_tree {
+    #@ tree [PATH...]
     orient();
     usage if @ARGV > 1;
     @ARGV = qw(/) if !@ARGV;
@@ -168,6 +180,7 @@ sub cmd_tree {
 }
 
 sub cmd_get {
+    #@ get [-hpk] [PATH...]
     my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0 );
     orient(
         'h|header' => \$opt{'header'},
@@ -189,6 +202,7 @@ sub cmd_get {
 }
 
 sub cmd_export {
+    #@ export [PATH...]
     # TODO: sort by id to ensure ref integrity when importing!!
     orient();
     @ARGV = qw(/) if !@ARGV;
@@ -245,6 +259,8 @@ sub _dump_object {
 }
 
 sub cmd_bind {
+    #@ bind NAME PATH
+    #= bind a name to a node
     orient();
     usage if @ARGV != 2;
     my $name = shift @ARGV;
@@ -254,6 +270,10 @@ sub cmd_bind {
 }
 
 sub cmd_bound {
+    #@ bound NAME
+    #= print path of the node to which NAME is bound
+    #@ bound NAME PATH
+    #= check if NAME is bound to PATH
     orient();
     if (@ARGV == 1) {
         my ($what) = @ARGV;
@@ -272,6 +292,8 @@ sub cmd_bound {
 }
 
 sub cmd_import {
+    #@ import [-i INTERVAL]
+    #= import nodes
     my $commit_interval = 100;
     orient(
         'i|commit-every=i' => \$commit_interval,
@@ -311,14 +333,30 @@ sub cmd_descend {
 }
 
 sub cmd_find {
-    my $start = '/';
+    #@ find [-1] [PATH] [KEY=VAL...]
+    #@ find [-1] '[' PATH... ']' [KEY=VAL...]
+    my $single;
     orient(
-        's|start=s' => \$start,
+        '1' => \$single,
     );
-    @ARGV = ($start), goto &cmd_descend if !@ARGV;
-    my @objects = $app->find($start, @ARGV);
-    foreach my $obj (@objects) {
-        print $obj->{'path'}, "\n";
+    my @start = argv_pathlist(1);
+    @start = qw(/) if !@start;
+    if (@ARGV) {
+        foreach my $start (@start) {
+            my @objects = $app->find($start, @ARGV);
+            foreach my $obj (@objects) {
+                print $obj->{'path'}, "\n";
+                return if $single;
+            }
+        }
+    }
+    elsif ($single) {
+        usage();
+    }
+    else {
+        foreach my $path (@start) {
+            print $_->{'path'}, "\n" for $app->descendants($path);
+        }
     }
 }
 
@@ -363,15 +401,20 @@ sub argv_props {
 }
 
 sub argv_path {
-    usage if !@ARGV;
+    my ($empty_ok) = 1;
+    if (!@ARGV || $ARGV[0] !~ m{^/}) {
+        return if $empty_ok;
+        usage;
+    }
     path(shift @ARGV);
 }
 
 sub argv_pathlist {
+    my ($empty_ok) = @_;
     my @list;
-    return argv_path() if $ARGV[0] ne '[';
+    return argv_path($empty_ok) if $ARGV[0] ne '[';
     shift @ARGV;
-    usage if !grep { $_ eq ']' } @ARGV;
+    usage if !$empty_ok && !grep { $_ eq ']' } @ARGV;
     while (@ARGV) {
         my $arg = shift @ARGV;
         last if $arg eq ']';
@@ -409,7 +452,27 @@ sub fatal {
 }
 
 sub usage {
-    print STDERR "usage: sw COMMAND [ARG...]\n";
+    my $pfx = 'usage: ';
+    my $printed;
+    foreach my $i (1..100) {
+        my @cmd = caller($i)
+            or last;
+        next if $cmd[3] !~ /^(?:[^:]+::)*cmd_(\S+)/;
+        my $cmd = $1;
+        open my $fh, '<', $RealScript or die "open $cmd[1]";
+        while (<$fh>) {
+            if ($cmd) {
+                next if !/^sub cmd_(\S+)/ || $1 ne $cmd;
+                undef $cmd;
+            }
+            last if /^}/;
+            next if !/^\s*#\@\s*(.+):: /;
+            print STDERR $pfx, PROG, ' ', $1, "\n";
+            $printed = 1;
+            $pfx =~ tr/ / /c;
+        }
+    }
+    print STDERR $pfx, PROG, " COMMAND [ARG...]\n" if !$printed;
     exit 1;
 }
 
