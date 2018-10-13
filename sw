@@ -1,9 +1,11 @@
 #!/usr/bin/perl
 
+package App::sw::main;
+
 use strict;
 use warnings;
 
-use FindBin qw($RealScript);
+use FindBin qw($Bin $Script);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -325,13 +327,6 @@ sub cmd_import {
     fatal "commit failed";
 }
 
-sub cmd_descend {
-    orient();
-    foreach my $path (@ARGV) {
-        print $_->{'path'}, "\n" for $app->descendants($path);
-    }
-}
-
 sub cmd_find {
     #@ find [-1] [PATH] [KEY=VAL...]
     #@ find [-1] '[' PATH... ']' [KEY=VAL...]
@@ -412,6 +407,10 @@ sub argv_path {
 sub argv_pathlist {
     my ($empty_ok) = @_;
     my @list;
+    if (!@ARGV) {
+        return if $empty_ok;
+        usage;
+    }
     return argv_path($empty_ok) if $ARGV[0] ne '[';
     shift @ARGV;
     usage if !$empty_ok && !grep { $_ eq ']' } @ARGV;
@@ -446,28 +445,28 @@ sub prop_array {
     return @list;
 }
 
+sub current_command {
+}
+
 sub fatal {
-    print STDERR "sw @_\n";
+    print STDERR PROG, ": @_\n";
     exit 2;
 }
 
 sub usage {
     my $pfx = 'usage: ';
-    my $printed;
-    foreach my $i (1..100) {
-        my @cmd = caller($i)
-            or last;
-        next if $cmd[3] !~ /^(?:[^:]+::)*cmd_(\S+)/;
-        my $cmd = $1;
-        open my $fh, '<', $RealScript or die "open $cmd[1]";
+    my ($found, $printed);
+    if (open my $fh, '<', "$Bin/$Script") {
         while (<$fh>) {
-            if ($cmd) {
+            if (!$found) {
                 next if !/^sub cmd_(\S+)/ || $1 ne $cmd;
-                undef $cmd;
+                $found = 1;
             }
-            last if /^}/;
-            next if !/^\s*#\@\s*(.+):: /;
-            print STDERR $pfx, PROG, ' ', $1, "\n";
+            last if /^\}/;
+            next if !s/^\s*#\@\s*//;
+            chomp;
+            s/\s+::.+//;
+            print STDERR $pfx, PROG, ' ', $_, "\n";
             $printed = 1;
             $pfx =~ tr/ / /c;
         }
@@ -1164,6 +1163,7 @@ sub init_plugins {
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
     }
 }
+
 # --- Testing code
 
 sub test {
