@@ -249,7 +249,7 @@ sub _dump_object {
     foreach (@props) {
         my ($k, $v) = @$_;
         if (ref $v) {
-            ($k, $v) = ('@'.$k, $v->{'path'});
+            ($k, $v) = ($k, $v->{'path'});
         }
         if ($opt->{'keys'}) {
             printf "%s=%s\n", $k, $v;
@@ -350,6 +350,7 @@ sub cmd_find {
     }
     else {
         foreach my $path (@start) {
+            print $path, "\n";
             print $_->{'path'}, "\n" for $app->descendants($path);
         }
     }
@@ -621,7 +622,7 @@ sub get {
     return map {
         my ($op, $k, $v) = @$_;
         $op & IS_REF
-            ? [ $k, db_object($dbh, $v) ]
+            ? [ '@'.$k, db_object($dbh, $v) ]
             : [ $k, $v                  ]
     } @props;
 }
