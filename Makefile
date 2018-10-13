@@ -19,7 +19,7 @@ install: install-prog install-plugins
 	
 install-prog: build
 	install -d $(PREFIX)/bin
-	install $(PROG) $(PREFIX)/bin/
+	install build/$(PROG) $(PREFIX)/bin/
 
 install-plugins:
 	install -d $(PLUGIN_DIR)
