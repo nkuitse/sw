@@ -31,9 +31,10 @@ sub fatal;
 my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = 'catalog.sq3';
-my $app;
 my (%command, %hook);
+my $app = App::sw->new('file' => $dbfile);
 
+init_commands();
 App::sw->init_plugins(PLUGIN_DIR);
 
 my ($cmd, $running);
@@ -57,7 +58,7 @@ sub cmd_init {
         if -e "$dir/$dbfile";
     -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
     chdir $dir or fatal "chdir $dir: $!";
-    $app = App::sw->create($dbfile);
+    $app->create($dbfile);
     print STDERR "initialized: $dir\n";
 }
 
@@ -366,7 +367,9 @@ sub orient {
         @_,
     ) or usage;
     chdir $dir or fatal "chdir $dir: $!";
-    $app = -e $dbfile ? App::sw->open($dbfile) : App::sw->create($dbfile);
+    if (-e $dbfile) {
+        $app->open($dbfile);
+    }
     $running = 1;
 }
 
@@ -446,6 +449,14 @@ sub prop_array {
     return @list;
 }
 
+sub init_commands {
+    my $h = eval('\%'.__PACKAGE__.'::');
+    while (my ($k, $v) = each %$h) {
+        next if $k !~ s/^cmd_//;
+        $command{$k} = $v;
+    }
+}
+
 sub current_command {
 }
 
@@ -456,6 +467,10 @@ sub fatal {
 
 sub usage {
     my $pfx = 'usage: ';
+    if (@_) {
+        print STDERR $pfx, PROG, ' ', @_, "\n";
+        exit 1;
+    }
     my ($found, $printed);
     if (open my $fh, '<', "$Bin/$Script") {
         while (<$fh>) {
@@ -1146,23 +1161,28 @@ sub init_plugins {
         my ($name, $cls) = ($1, "App::sw::Plugin::$1");
         my $ok = eval {
             require $f;
-            my $plugin = $cls->new('sw' => $app);
+            my $plugin = $cls->new('app' => $app);
             my %c = eval { $plugin->commands };
             my %h = eval { $plugin->hooks };
             while (my ($cmd, $sub) = each %c) {
                 die "plugin $name provides command $cmd but it is already provided"
                     if exists $command{$cmd};
-                $command{$cmd} = sub { $sub->(@ARGV) };
+                $command{$cmd} = sub { $sub->($plugin) };
             }
             while (my ($hook, $sub) = each %h) {
                 die "plugin $name provides hook $hook but it is already provided"
                     if exists $hook{$hook};
-                $hook{$hook} = $sub;
+                $hook{$hook} = sub { $sub->($plugin) };
             }
             1;  # OK
         };
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
     }
+}
+
+sub orient {
+    my $self = shift;
+    goto &App::sw::main::orient;
 }
 
 # --- Testing code
