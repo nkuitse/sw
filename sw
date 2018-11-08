@@ -197,7 +197,7 @@ sub cmd_ls {
         my @objects = $app->children($obj);
         foreach my $obj (@objects) {
             my $name = $obj->{'path'};
-            $name =~ s{.+/}{} if !$full;
+            $name =~ s{.*/}{} if !$full;
             if ($long) {
                 printf "%6d %s\n", $obj->{'id'}, $name;
             }
