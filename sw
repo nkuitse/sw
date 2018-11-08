@@ -376,6 +376,7 @@ sub cmd_find {
     orient(
         '1' => \$single,
     );
+    s{^:/}{:name=} for @ARGV;
     my @start = argv_pathlist(1);
     @start = qw(/) if !@start;
     if (@ARGV) {
@@ -1174,7 +1175,7 @@ sub _props {
     while (@_) {
         my $x = shift @_;
         my $r = ref $x;
-        if ($r eq '' && $x =~ /^([-+])?([@])?([A-Za-z0-9][-:._A-Za-z0-9]*)(?:=(.*))?$/) {
+        if ($r eq '' && $x =~ /^([-+])?([@])?(:?[A-Za-z0-9][-:._A-Za-z0-9]*)(?:=(.*))?$/) {
             my ($op, $k, $v) = ($op2int{$1||'='}, $3, $4);
             die if !($op & $modes);
             $op |= IS_REF if $2;
