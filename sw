@@ -169,6 +169,7 @@ sub cmd_mv {
         # Move to dest, i.e., under dest's parent but with dest's name
         usage if @ARGV != 1;
         (my $under = $dest) =~ s{[^/]+$}{};
+        $under =~ s{(?<=.)/$}{};
         (my $name = $dest) =~ s{.*/}{};
         $app->_transact(sub {
             my $parent = $app->object($under);
@@ -417,6 +418,14 @@ sub cmd_config {
         my $val = $config{$key}
             or fatal "no such config setting: $key";
         print @ARGV == 1 ? ($val, "\n") : ($key, '=', $val, "\n");
+    }
+}
+
+sub cmd_exists {
+    #@ exists PATH... :: check if node(s) exist
+    orient();
+    foreach my $path (@ARGV) {
+        exit 2 if !$app->is_present($path);
     }
 }
 
@@ -854,20 +863,25 @@ sub db_remove_object {
 }
 
 sub db_move_object {
-    my ($dbh, $o, $parent, $name) = @_;
+    my ($dbh, $o, $parent, $newname) = @_;
     my $obj = db_object($dbh, $o);
     my $oid = db_oid($dbh, $obj);
     my $poid = db_oid($dbh, $parent);
     my $pfx = db_path($dbh, $parent) . '/';
     $pfx =~ s{//+$}{/};
     my $oldpath = db_path($dbh, $obj);
-    my $newpath = $pfx . $name;
+    (my $oldname = $oldpath) =~ s{.+/}{};
+    my $newpath = $pfx . $newname;
     my $newpfx = $newpath . '/';
     my $sth;
     $sth = $dbh->prepare('UPDATE objects SET path = ?, parent = ? WHERE id = ?');
     $sth->execute($newpath, $poid, $oid);
     $sth = $dbh->prepare('UPDATE objects SET path = ? || substr(path, ?) WHERE path LIKE ?');
     $sth->execute($newpfx, length($oldpath)+2, $oldpath . '/%');
+    if ($oldname ne $newname) {
+        $sth = $dbh->prepare(q{UPDATE properties SET val = ? WHERE object = ? AND key = ':name'});
+        $sth->execute($newname, $oid);
+    }
 }
 
 sub db_set_properties {
