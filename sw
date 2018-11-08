@@ -32,7 +32,7 @@ my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = 'catalog.sq3';
 my (%command, %hook);
-my $app = App::sw->new('file' => $dbfile);
+my $app = App::sw->new('file' => "$dir/$dbfile");
 
 init_commands();
 App::sw->init_plugins(PLUGIN_DIR);
@@ -142,6 +142,45 @@ sub cmd_rm {
     }
 }
 
+sub cmd_mv {
+    #@ mv PATH... NEWPARENT/
+    orient();
+    usage if @ARGV < 2;
+    my $dest = pop @ARGV;
+    if ($dest =~ m{/$}) {
+        $app->_transact(sub {
+            my $destobj = $app->object($dest);
+            foreach my $path (@ARGV) {
+                fatal "root node cannot be moved" if $path eq '/';
+                fatal "node cannot be moved under its own descendant"
+                    if index($dest, $path.'/') == 0;
+                my $obj = $app->object($path);
+                (my $name = $path) =~ s{.+/}{};
+                my $newobj = eval { $app->object("$dest/$name") };
+                fatal "object $dest/$name already exists"
+                    if defined $newobj;
+                $app->move($obj, $dest, $name);
+            }
+        });
+    }
+    else {
+        usage if @ARGV != 1;
+        (my $under = $dest) =~ s{[^/]+$}{};
+        (my $name = $dest) =~ s{.*/}{};
+        $app->_transact(sub {
+            my $parent = $app->object($under);
+            my ($path) = @ARGV;
+            fatal "root node cannot be moved" if $path eq '/';
+            fatal "node cannot be moved under its own descendant"
+                if index($dest, $path.'/') == 0;
+            my $obj = $app->object($path);
+            my $newobj = eval { $app->object("$dest/$name") };
+            fatal "object $dest/$name already exists"
+                if defined $newobj;
+            $app->move($obj, $parent, $name);
+        });
+    }
+}
 
 sub cmd_ls {
     #@ ls [-lf] [PATH...]
@@ -598,6 +637,14 @@ sub remove {
     });
 }
 
+sub move {
+    my ($self, $obj, $parent, $name) = @_;
+    $self->_transact(sub {
+        my ($dbh) = @_;
+        db_move_object($dbh, $obj, $parent, $name);
+    });
+}
+
 sub bind {
     my ($self, $name, $obj) = @_;
     $self->_transact(sub {
@@ -772,6 +819,17 @@ sub db_remove_object {
     $dbh->do('DELETE FROM properties WHERE object = ? OR ref = ?', {}, $oid, $oid);
     $dbh->do('DELETE FROM bindings WHERE ref = ?', {}, $oid);
     $dbh->do('DELETE FROM objects WHERE id = ?', {}, $oid);
+}
+
+sub db_move_object {
+    my ($dbh, $o, $parent, $name) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $poid = db_oid($dbh, $parent);
+    my $pfx = db_path($dbh, $parent) . '/';
+    $pfx =~ s{//+$}{/};
+    my $path = $pfx . $name;
+    $dbh->do('UPDATE objects SET path = ?, parent = ? WHERE id = ?', $path, $poid, $oid);
+    $dbh->do('UPDATE objects SET path = ? || substr(path, ?) WHERE path LIKE ?', $pfx, length($path)+1, $path . '/%');
 }
 
 sub db_set_properties {
