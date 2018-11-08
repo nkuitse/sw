@@ -807,7 +807,9 @@ sub db_create_object {
         'id' => $dbh->sqlite_last_insert_rowid,
     };
     $sth->finish;
-    db_insert_properties($dbh, $obj, @props) if @props;
+    (my $name = $path) =~ s{.+/}{};  # Leave / as /
+    push @props, [ OP_SET, ':name', $name ];
+    db_insert_properties($dbh, $obj, @props);
     return $obj;
 }
 
