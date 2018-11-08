@@ -5,12 +5,14 @@ build: build/$(PROG)
 configure: config.mk
 
 config.mk: config.mk.def
-	cp $< $@
-	$(VISUAL) $<
+	if [ ! -e $@ ]; then \
+		cp $< $@; \
+		$(VISUAL) $<; \
+	fi
 
 build/$(PROG): configure sw
 	install -d build
-	bin/build PROG=$(PROG) ENV_VAR=$(ENV_VAR) PREFIX=$(PREFIX) DB_DIR=$(DB_DIR) PLUGIN_DIR=$(PLUGIN_DIR) < sw > $@
+	bin/build PROG=$(PROG) ENV_VAR=$(ENV_VAR) PREFIX=$(PREFIX) DB_DIR=$(DB_DIR) DB_FILE=$(DB_FILE) PLUGIN_DIR=$(PLUGIN_DIR) < sw > $@
 
 clean:
 	rm -Rf build

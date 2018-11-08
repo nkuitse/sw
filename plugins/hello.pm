@@ -17,6 +17,7 @@ sub commands {
 sub hooks { }
 
 sub hello {
+    my $self = shift;
     @_ = qw(world) if !@_;
     print STDERR "Hello @_\n";
 }

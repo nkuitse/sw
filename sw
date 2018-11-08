@@ -12,6 +12,7 @@ use Getopt::Long
 use constant PROG => 'sw';
 use constant PREFIX => '/usr/local';
 use constant DB_DIR => '/var/local/sw';
+use constant DB_FILE => 'catalog.sq3';
 use constant PLUGIN_DIR => '/usr/local/sw/plugins';
 use constant ENV_VAR => 'SW_DIR';
 
@@ -30,7 +31,7 @@ sub fatal;
 
 my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
-my $dbfile = 'catalog.sq3';
+my $dbfile = DB_FILE;
 my (%command, %hook);
 my $app = App::sw->new('file' => "$dir/$dbfile");
 
@@ -397,6 +398,26 @@ sub cmd_find {
     }
 }
 
+sub cmd_config {
+    #@ config [--program | --prefix | --db-dir | --db-file | --plugin-dir | --env-var]...
+    unshift @ARGV, '--' if @ARGV && $ARGV[0] =~ /^-/;
+    orient();
+    my %config = (
+        'program' => PROG,
+        'prefix' => PREFIX,
+        'db-dir' => DB_DIR,
+        'db-file' => DB_FILE,
+        'plugin-dir' => PLUGIN_DIR,
+        'env-var' => ENV_VAR,
+    );
+    @ARGV = sort keys %config if !@ARGV;
+    foreach my $key (@ARGV) {
+        $key =~ s/^--//;
+        my $val = $config{$key}
+            or fatal "no such config setting: $key";
+        print @ARGV == 1 ? ($val, "\n") : ($key, '=', $val, "\n");
+    }
+}
 
 # --- Other functions
 
