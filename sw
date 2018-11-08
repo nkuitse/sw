@@ -148,22 +148,24 @@ sub cmd_mv {
     usage if @ARGV < 2;
     my $dest = pop @ARGV;
     if ($dest =~ m{/$}) {
+        # Move under $dest
+        (my $destpath = $dest) =~ s{(?<=.)/$}{};
         $app->_transact(sub {
-            my $destobj = $app->object($dest);
+            my $parent = $app->object($destpath);
             foreach my $path (@ARGV) {
                 fatal "root node cannot be moved" if $path eq '/';
                 fatal "node cannot be moved under its own descendant"
                     if index($dest, $path.'/') == 0;
                 my $obj = $app->object($path);
-                (my $name = $path) =~ s{.+/}{};
-                my $newobj = eval { $app->object("$dest/$name") };
-                fatal "object $dest/$name already exists"
-                    if defined $newobj;
-                $app->move($obj, $dest, $name);
+                (my $name = $path) =~ s{.*/}{};
+                fatal "object $dest$name already exists"
+                    if $app->is_present($dest.$name);
+                $app->move($obj, $parent, $name);
             }
         });
     }
     else {
+        # Move to dest, i.e., under dest's parent but with dest's name
         usage if @ARGV != 1;
         (my $under = $dest) =~ s{[^/]+$}{};
         (my $name = $dest) =~ s{.*/}{};
@@ -174,9 +176,8 @@ sub cmd_mv {
             fatal "node cannot be moved under its own descendant"
                 if index($dest, $path.'/') == 0;
             my $obj = $app->object($path);
-            my $newobj = eval { $app->object("$dest/$name") };
             fatal "object $dest/$name already exists"
-                if defined $newobj;
+                if $app->is_present("$dest/$name");
             $app->move($obj, $parent, $name);
         });
     }
@@ -586,6 +587,7 @@ sub open {
 sub connect {
     my ($self, $file) = @_;
     my $dbh = $self->{'dbh'} = (DBI->connect("dbi:SQLite:dbname=$file",'','') or die "connect failed");
+    $dbh->{'RaiseError'} = 1;
     $dbh->do('pragma foreign_keys=on');
     return $self;
 }
@@ -598,6 +600,12 @@ sub initialize {
     });
     return $self;
 }
+
+sub is_present {
+    my ($self, $obj) = @_;
+    return db_object($self->{'dbh'}, $obj, 1);
+}
+
 
 sub object {
     my ($self, $obj) = @_;
@@ -825,13 +833,19 @@ sub db_remove_object {
 
 sub db_move_object {
     my ($dbh, $o, $parent, $name) = @_;
-    my $oid = db_oid($dbh, $o);
+    my $obj = db_object($dbh, $o);
+    my $oid = db_oid($dbh, $obj);
     my $poid = db_oid($dbh, $parent);
     my $pfx = db_path($dbh, $parent) . '/';
     $pfx =~ s{//+$}{/};
-    my $path = $pfx . $name;
-    $dbh->do('UPDATE objects SET path = ?, parent = ? WHERE id = ?', $path, $poid, $oid);
-    $dbh->do('UPDATE objects SET path = ? || substr(path, ?) WHERE path LIKE ?', $pfx, length($path)+1, $path . '/%');
+    my $oldpath = db_path($dbh, $obj);
+    my $newpath = $pfx . $name;
+    my $newpfx = $newpath . '/';
+    my $sth;
+    $sth = $dbh->prepare('UPDATE objects SET path = ?, parent = ? WHERE id = ?');
+    $sth->execute($newpath, $poid, $oid);
+    $sth = $dbh->prepare('UPDATE objects SET path = ? || substr(path, ?) WHERE path LIKE ?');
+    $sth->execute($newpfx, length($oldpath)+2, $oldpath . '/%');
 }
 
 sub db_set_properties {
@@ -949,7 +963,7 @@ sub db_binding {
 }
 
 sub db_object {
-    my ($dbh, $o) = @_;
+    my ($dbh, $o, $check_only) = @_;
     return $o if ref $o;
     my ($sth, @params);;
     if ($o =~ m{^/}) {
@@ -984,7 +998,7 @@ sub db_object {
     $sth->execute(@params);
     my $obj = $sth->fetchrow_hashref;
     $sth->finish;
-    die "no such object: $o" if !$obj;
+    die "no such object: $o" if !$obj && !$check_only;
     return $obj;
 }
 
