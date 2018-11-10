@@ -258,7 +258,8 @@ sub cmd_export {
         _dump_object($obj, { 'header' => 1, 'keys' => 1 }, $app->get($obj));
     }, @ARGV);
 ###     foreach my $k (sort keys %$obj) {
-###         my $v = $obj->{$k} // next;
+###         my $v = $obj->{$k};
+###         next if !defined $v;
 ###         printf "#%s=%s\n", $k, $v if $k ne 'path';
 ###     }
 ###     my @props = $app->get($obj);
@@ -276,7 +277,8 @@ sub _dump_object {
         my $path = $obj->{'path'};
         print $path, "\n";
         foreach my $k (sort keys %$obj) {
-            my $v = $obj->{$k} // next;
+            my $v = $obj->{$k};
+            next if !defined $v;
             printf "#%s=%s\n", $k, $v if $k ne 'path';
         }
     }
