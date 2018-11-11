@@ -276,11 +276,11 @@ sub _dump_object {
     if ($opt->{'header'}) {
         my $path = $obj->{'path'};
         print $path, "\n";
-        foreach my $k (sort keys %$obj) {
-            my $v = $obj->{$k};
-            next if !defined $v;
-            printf "#%s=%s\n", $k, $v if $k ne 'path';
-        }
+        #foreach my $k (sort keys %$obj) {
+        #    my $v = $obj->{$k};
+        #    next if !defined $v;
+        #    printf "#%s=%s\n", $k, $v if $k ne 'path';
+        #}
     }
     elsif ($opt->{'path'}) {
         my $path = $obj->{'path'};
@@ -572,12 +572,13 @@ use warnings;
 use DBI;
 
 use constant IS_REF    => 256;
+use constant IS_INTRIN => 512;
 
 use constant OP_SET    => 1;
 use constant OP_APPEND => 2;
 use constant OP_REMOVE => 4;
 use constant OP_KEY    => 8;
-use constant OP_ANY    => ~IS_REF;
+use constant OP_ANY    => OP_KEY*2 - 1;
 
 my %op2int;
 
@@ -726,7 +727,9 @@ sub get {
         my ($op, $k, $v) = @$_;
         $op & IS_REF
             ? [ '@'.$k, db_object($dbh, $v) ]
-            : [ $k, $v                  ]
+            : $op & IS_INTRIN
+                  ? [ ':'.$k, $v ]
+                  : [ $k, $v     ]
     } @props;
 }
 
@@ -900,7 +903,7 @@ sub db_insert_properties {
     return if !@props;
     my $oid = db_oid($dbh, $o);
     my @refs = grep {   $_->[0] & IS_REF  } @props;
-    my @vals = grep { !($_->[0] & IS_REF) } @props;
+    my @vals = grep { !($_->[0] & IS_REF & IS_INTRIN) } @props;
     if (@refs) {
         my $sth = $dbh->prepare(
             sprintf 'INSERT INTO properties (object, key, ref) VALUES %s',
@@ -931,6 +934,9 @@ sub db_remove_properties {
         if ($op & (OP_SET|OP_REMOVE)) {
             if ($op & IS_REF) {
                 push @criteria, '(key = ? AND ref IN (SELECT id FROM objects WHERE path = ?))';
+            }
+            elsif ($op & IS_INTRIN) {
+                die 'cannot remove intrinsic properties';
             }
             else {
                 push @criteria, '(key = ? AND val = ?)';
@@ -1056,10 +1062,20 @@ sub db_path {
 
 sub db_get_properties {
     my ($dbh, $o) = @_;
-    my $oid = db_oid($dbh, $o);
+    my $obj = db_object($dbh, $o);
+    my $oid = db_oid($dbh, $obj);
+    my $path = db_path($dbh, $obj);
+    (my $name = $path) =~ s{.*/(?=.)}{};
     my $sth = $dbh->prepare('SELECT key, val, ref FROM properties WHERE object = ? ORDER BY key, val, ref');
     $sth->execute($oid);
-    my @props;
+    my @props = (
+        [ OP_SET|IS_INTRIN, 'id',   $oid  ],
+        [ OP_SET|IS_INTRIN, 'path', $path ],
+        [ OP_SET|IS_INTRIN, 'name', $name ],
+    );
+    if ($path ne '/') {
+        push @props, [ OP_SET|IS_INTRIN, 'parent', db_oid($dbh, db_get_parent($dbh, $obj)) ];
+    }
     while (my ($k, $v, $r) = $sth->fetchrow_array) {
         if ($r) {
             push @props, [ OP_SET|IS_REF, $k, $r ];
@@ -1070,6 +1086,16 @@ sub db_get_properties {
     }
     $sth->finish;
     return @props;
+}
+
+sub db_get_parent {
+    my ($dbh, $o) = @_;
+    my $oid = db_oid($dbh, $o);
+    my $sth = $dbh->prepare('SELECT p.* FROM objects c, objects p WHERE c.parent = p.id and c.id = ?');
+    $sth->execute($oid);
+    my $parent = $sth->fetchrow_hashref;
+    $sth->finish;
+    return $parent;
 }
 
 sub db_get_children {
@@ -1116,33 +1142,50 @@ sub db_get_bindings {
 sub db_find_objects {
     my $dbh = shift;
     my $root = db_object($dbh, shift);
-    my (@parts, @params);
+    my (@pparts, @pparams, @oparts, @oparams);
     foreach (@_) {
         my ($op, $k, $v) = @$_;
         if ($op & OP_SET) {
             if ($op & IS_REF) {
-                push @parts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
-                push @params, $k, $v;
+                push @pparts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
+                push @pparams, $k, $v;
+            }
+            elsif ($op & IS_INTRIN) {
+                if ($k =~ /^(id|path|parent)$/) {
+                    push @oparts, "o.$k = ?";
+                    push @oparams, $v;
+                }
+                elsif ($k eq 'name') {
+                    push @oparts, 'o.path LIKE ?';
+                    push @oparams, "%/$v";
+                }
             }
             else {
-                push @parts, '(p.key = ? AND p.val = ?)';
-                push @params, $k, $v;
+                push @pparts, '(p.key = ? AND p.val = ?)';
+                push @pparams, $k, $v;
             }
         }
         elsif ($op & OP_KEY) {
-            push @parts, '(p.key = ?)';
-            push @params, $k;
+            push @pparts, '(p.key = ?)';
+            push @pparams, $k;
         }
     }
     my $start = $root->{'path'};
-    my $sql = sprintf 'SELECT o.id, o.path, o.parent, p.key FROM objects o INNER JOIN properties p ON o.id = p.object WHERE %s',
-        join(' OR ', @parts);
+    my $sql;
+    if (@pparts) {
+        $sql = sprintf 'SELECT o.id, o.path, o.parent, p.key FROM objects o INNER JOIN properties p ON o.id = p.object WHERE %s',
+            join(' OR ', @pparts, @oparts);
+    }
+    else {
+        $sql = sprintf 'SELECT o.id, o.path, o.parent, 1 FROM objects o WHERE %s',
+            join(' OR ', @oparts);
+    }
     if ($start ne '/') {
         $sql .= ' AND o.path LIKE ?';
-        push @params, $start . '%';
+        push @oparams, $start . '%';
     }
     my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
+    $sth->execute(@pparams, @oparams);
     my %match;
     my %object;
     while (my ($oid, $path, $parent, $key) = $sth->fetchrow_array) {
@@ -1151,7 +1194,7 @@ sub db_find_objects {
     }
     my @objects;
     while (my ($oid, $matched) = each %match) {
-        delete $object{$oid} if scalar(keys %$matched) != @parts;
+        delete $object{$oid} if scalar(keys %$matched) != @pparts + @oparts;
     }
     return values %object;
 }
@@ -1191,10 +1234,11 @@ sub _props {
     while (@_) {
         my $x = shift @_;
         my $r = ref $x;
-        if ($r eq '' && $x =~ /^([-+])?([@])?(:?[A-Za-z0-9][-:._A-Za-z0-9]*)(?:=(.*))?$/) {
+        if ($r eq '' && $x =~ /^([-+])?([\@:]?)(:?[A-Za-z0-9][-:._A-Za-z0-9]*)(?:=(.*))?$/) {
             my ($op, $k, $v) = ($op2int{$1||'='}, $3, $4);
             die if !($op & $modes);
-            $op |= IS_REF if $2;
+            $op |= IS_REF if $2 eq '@';
+            $op |= IS_INTRIN if $2 eq ':';
             if (!defined $v) {
                 if ($op & OP_REMOVE) {
                     push @props, [ $op, $k ];
