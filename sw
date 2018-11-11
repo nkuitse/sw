@@ -852,7 +852,6 @@ sub db_create_object {
     };
     $sth->finish;
     (my $name = $path) =~ s{.+/}{};  # Leave / as /
-    push @props, [ OP_SET, ':name', $name ];
     db_insert_properties($dbh, $obj, @props);
     return $obj;
 }
@@ -883,10 +882,6 @@ sub db_move_object {
     $sth->execute($newpath, $poid, $oid);
     $sth = $dbh->prepare('UPDATE objects SET path = ? || substr(path, ?) WHERE path LIKE ?');
     $sth->execute($newpfx, length($oldpath)+2, $oldpath . '/%');
-    if ($oldname ne $newname) {
-        $sth = $dbh->prepare(q{UPDATE properties SET val = ? WHERE object = ? AND key = ':name'});
-        $sth->execute($newname, $oid);
-    }
 }
 
 sub db_set_properties {
