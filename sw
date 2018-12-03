@@ -898,7 +898,7 @@ sub db_insert_properties {
     return if !@props;
     my $oid = db_oid($dbh, $o);
     my @refs = grep {   $_->[0] & IS_REF  } @props;
-    my @vals = grep { !($_->[0] & IS_REF & IS_INTRIN) } @props;
+    my @vals = grep { !($_->[0] & (IS_REF|IS_INTRIN)) } @props;
     if (@refs) {
         my $sth = $dbh->prepare(
             sprintf 'INSERT INTO properties (object, key, ref) VALUES %s',
