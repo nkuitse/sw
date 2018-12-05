@@ -49,11 +49,15 @@ sub getent_hosts {
             my ($addr, @hosts) = split /\s+/, $_;
             my $k = $addr =~ /:/ ? 'ip6addr' : 'ip4addr';
             foreach my $host (@hosts) {
-                my $obj = eval { $app->object("$hpfx/$host") }
-                          ||     $app->insert("$hpfx/$host");
-                $app->append("$hpfx/$host",
-                    $k => $addr,
-                );
+                my $path = "$hpfx/$host";
+                my $obj = eval { $app->object($path, 1) };
+                if ($obj) {
+                    $app->append($obj, $k => $addr)
+                        if !grep { $_->[0] eq $k } $app->get($obj);
+                }
+                else {
+                    $obj = $app->insert($path, $k => $addr);
+                }
             }
         }
     });
