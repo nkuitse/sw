@@ -16,13 +16,14 @@ use constant DB_FILE => 'catalog.sq3';
 use constant PLUGIN_DIR => '/usr/local/sw/plugins';
 use constant ENV_VAR => 'SW_DIR';
 
-use constant IS_MAGIC  => 256;
-
 use constant OP_SET    => 1;
 use constant OP_APPEND => 2;
 use constant OP_REMOVE => 4;
 use constant OP_KEY    => 8;
-use constant OP_ANY    => ~IS_MAGIC;
+use constant OP_ANY    => OP_KEY*2 - 1;
+
+use constant IS_WILD   => 128;
+use constant IS_MAGIC  => 256;
 
 sub usage;
 sub fatal;
@@ -592,6 +593,9 @@ use constant OP_REMOVE => 4;
 use constant OP_KEY    => 8;
 use constant OP_ANY    => OP_KEY*2 - 1;
 
+use constant IS_WILD   => 128;
+use constant IS_MAGIC  => 256;
+
 my %op2int;
 
 sub new {
@@ -782,7 +786,7 @@ sub descendants {
 sub find {
     my ($self, $o) = splice @_, 0, 2;
     my $dbh = $self->{'dbh'};
-    return db_find_objects($dbh, $o, _props(OP_SET|OP_KEY, @_));
+    return db_find_objects($dbh, $o, _props(OP_SET|OP_KEY|IS_WILD, @_));
 }
 
 sub walk {
@@ -1154,8 +1158,14 @@ sub db_find_objects {
         my ($op, $k, $v) = @$_;
         if ($op & OP_SET) {
             if ($op & IS_REF) {
-                push @pparts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
-                push @pparams, $k, $v;
+                if ($k eq '') {
+                    push @pparts, '(p.ref IN (SELECT id FROM objects WHERE path = ?))';
+                    push @pparams, $v;
+                }
+                else {
+                    push @pparts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
+                    push @pparams, $k, $v;
+                }
             }
             elsif ($op & IS_INTRIN) {
                 if ($k =~ /^(id|path|parent)$/) {
@@ -1276,6 +1286,12 @@ sub _props {
                 die if !($op & $modes);
                 push @props, ref($v) eq 'ARRAY' ? map { [ $op, $k, $_ ] } @$v : [ $op, $k, $v ];
             }
+        }
+        elsif (($modes & IS_WILD) && $r eq '' && $x =~ /^([\@:]?)[*]=(.+)?$/) {
+            my ($op, $k, $v) = ($op2int{'='}, '', $2);
+            $op |= IS_REF if $1 eq '@';
+            $op |= IS_INTRIN if $1 eq ':';
+            push @props, [ $op, $k, $v ];
         }
         else {
             die;
