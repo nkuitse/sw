@@ -63,4 +63,36 @@ sub getent_hosts {
     });
 }
 
+sub getent_passwd {
+    my $self = shift;
+    my $app = $self->app;
+    my $upfx = '/user';
+    my $file = '/etc/passwd';
+    $self->app->orient(
+        'p=s' => \$upfx,
+        'f=s' => \$file,
+    );
+    open my $fh, '<', $file or die "open $file: $!";
+    $app->_transact(sub {
+        while (<$fh>) {
+            chomp;
+            my ($login, $pass, $uid, $gid, $gecos, $home, $shell) = split /:/;
+            my $path = "$upfx/$login";
+            my $obj = eval { $app->object($path, 1) };
+            if ($obj) {
+                1;  # Already in sw
+            }
+            else {
+                $obj = $app->insert($path,
+                    'uid' => $uid,
+                    'gid' => $gid,
+                    'gecos' => $gecos,
+                    'home' => $home,
+                    'shell' => $shell,
+                );
+            }
+        }
+    });
+}
+
 1;
