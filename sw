@@ -375,9 +375,10 @@ sub cmd_import {
 sub cmd_find {
     #@ find [-1] [PATH] [KEY=VAL...]
     #@ find [-1] '[' PATH... ']' [KEY=VAL...]
-    my $single;
+    my ($single, $print_value);
     orient(
         '1' => \$single,
+        'v' => \$print_value,
     );
     s{^:/}{:name=} for @ARGV;
     my @start = argv_pathlist(1);
@@ -387,6 +388,17 @@ sub cmd_find {
             my @objects = $app->find($start, @ARGV);
             foreach my $obj (@objects) {
                 print $obj->{'path'}, "\n";
+                if ($print_value) {
+                    my @props = $app->get($obj);
+                    my %opt = ('keys' => 1);
+                    if (@ARGV) {
+                        my %want = map { $_ => 1 } @ARGV;
+                        @props = grep { $want{$_->[0]} } @props;
+                        $opt{'sort'} = [ @ARGV ];
+                    }
+                    _dump_object($obj, \%opt, @props);
+                    print "\n";
+                }
                 return if $single;
             }
         }
