@@ -196,7 +196,7 @@ sub cmd_ls {
     foreach my $path (@ARGV) {
         my $obj = $app->object($path);
         my @objects = $app->children($obj);
-        foreach my $obj (@objects) {
+        foreach my $obj (sort { $a->{'path'} cmp $b->{'path'} } @objects) {
             my $name = $obj->{'path'};
             $name =~ s{.*/}{} if !$full;
             if ($long) {
