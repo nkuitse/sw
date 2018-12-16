@@ -227,11 +227,12 @@ sub cmd_tree {
 
 sub cmd_get {
     #@ get [-hpk] [PATH...]
-    my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0 );
+    my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0, 'intrinsics' => 0 );
     orient(
         'h|header' => \$opt{'header'},
         'p|path' => \$opt{'path'},
         'k|keys' => \$opt{'keys'},
+        'i|intrinsics' => \$opt{'intrinsics'},
     );
     my $path = argv_path();
     my $obj = $app->object($path);
@@ -250,26 +251,17 @@ sub cmd_get {
 sub cmd_export {
     #@ export [PATH...]
     # TODO: sort by id to ensure ref integrity when importing!!
-    orient();
+    my %opt = ( 'header' => 1, 'keys' => 1, 'intrinsics' => 0 );
+    orient(
+        'i|intrinsics' => \$opt{'intrinsics'},
+    );
     @ARGV = qw(/) if !@ARGV;
     my $n = 0;
     $app->walk(sub {
         my ($obj, $level, @children) = @_;
         print "\n" if $n++;
-        _dump_object($obj, { 'header' => 1, 'keys' => 1 }, $app->get($obj));
+        _dump_object($obj, \%opt, $app->get($obj));
     }, @ARGV);
-###     foreach my $k (sort keys %$obj) {
-###         my $v = $obj->{$k};
-###         next if !defined $v;
-###         printf "#%s=%s\n", $k, $v if $k ne 'path';
-###     }
-###     my @props = $app->get($obj);
-###     foreach (@props) {
-###         my ($k, $v) = @$_;
-###         printf "%s=%s\n", $k, $v;
-###     }
-###     print "\n";
-### }, @ARGV);
 }
 
 sub _dump_object {
@@ -277,11 +269,6 @@ sub _dump_object {
     if ($opt->{'header'}) {
         my $path = $obj->{'path'};
         print $path, "\n";
-        #foreach my $k (sort keys %$obj) {
-        #    my $v = $obj->{$k};
-        #    next if !defined $v;
-        #    printf "#%s=%s\n", $k, $v if $k ne 'path';
-        #}
     }
     elsif ($opt->{'path'}) {
         my $path = $obj->{'path'};
@@ -294,6 +281,7 @@ sub _dump_object {
     }
     foreach (@props) {
         my ($k, $v) = @$_;
+        next if !$opt->{'intrinsics'} && $k =~ /^:/;
         if (ref $v) {
             ($k, $v) = ($k, $v->{'path'});
         }
@@ -1179,6 +1167,32 @@ sub db_find_objects {
             }
             else {
                 push @pparts, '(p.key = ? AND p.val = ?)';
+                push @pparams, $k, $v;
+            }
+        }
+        elsif ($op & OP_REMOVE) {
+            if ($op & IS_REF) {
+                if ($k eq '') {
+                    # -@network=/n/dmz
+                    die;
+                }
+                else {
+                    # -@network=/n/dmz
+                    push @pparts, '(p.key = ? AND p.ref IN (SELECT id FROM objects WHERE path = ?))';
+                    push @pparams, $k, $v;
+                }
+            }
+            elsif ($op & IS_INTRIN) {
+                die;
+            }
+            elsif ($op & OP_KEY) {
+                # -ip4addr
+                push @pparts , 'o.id NOT IN (SELECT object FROM properties WHERE key = ?)';
+                push @pparams, $k;
+            }
+            else {
+                # -ip4addr=1.2.3.4
+                push @pparts , 'o.id NOT IN (SELECT object FROM properties WHERE key = ? AND val = ?)';
                 push @pparams, $k, $v;
             }
         }
