@@ -212,16 +212,26 @@ sub cmd_ls {
 
 sub cmd_tree {
     #@ tree [PATH...]
-    orient();
+    my $maxlevel = 999;
+    orient(
+        'M=i' => \$maxlevel,
+        '1' => sub { $maxlevel = 1 },
+    );
     usage if @ARGV > 1;
     @ARGV = qw(/) if !@ARGV;
     $app->walk(sub {
         my ($obj, $level, @children) = @_;
         my ($id, $path) = @$obj{qw(id path)};
         (my $name = $path) =~ s{.*/(?=.)}{};
-        print '  ' x $level, $name;
+        if ($level == 0) {
+            print $path;
+        }
+        else {
+            print '  ' x $level, $name;
+        }
         print '/' if @children && $path ne '/';
         print "\n";
+        return -1 if $level == $maxlevel;
     }, @ARGV);
 }
 
@@ -250,10 +260,14 @@ sub cmd_get {
 
 sub cmd_export {
     #@ export [PATH...]
-    # TODO: sort by id to ensure ref integrity when importing!!
+    # TODO: sort by id to ensure ref integrity when importing!?
     my %opt = ( 'header' => 1, 'keys' => 1, 'intrinsics' => 0 );
+    my $maxlevel = 999;
     orient(
         'i|intrinsics' => \$opt{'intrinsics'},
+        'M=i' => \$maxlevel,
+        '0' => sub { $maxlevel = 0 },
+        '1' => sub { $maxlevel = 1 },
     );
     @ARGV = qw(/) if !@ARGV;
     my $n = 0;
@@ -261,6 +275,7 @@ sub cmd_export {
         my ($obj, $level, @children) = @_;
         print "\n" if $n++;
         _dump_object($obj, \%opt, $app->get($obj));
+        return -1 if $level == $maxlevel;
     }, @ARGV);
 }
 
@@ -786,7 +801,8 @@ sub walk {
     $walker = sub {
         my ($obj) = @_;
         my @children = db_get_children($dbh, $obj);
-        $proc->($obj, $level, @children);
+        my $res = $proc->($obj, $level, @children);
+        return if defined $res && $res == -1;
         $level++;
         $walker->($_) for @children;
         $level--;
