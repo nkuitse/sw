@@ -321,18 +321,30 @@ sub cmd_bind {
 }
 
 sub cmd_bound {
+    #@ bound
+    #= print all bindings (NAME PATH)
     #@ bound NAME
     #= print path of the node to which NAME is bound
     #@ bound NAME PATH
     #= check if NAME is bound to PATH
     orient();
-    if (@ARGV == 1) {
+    if (@ARGV == 0) {
+        my %bound = $app->bound;
+        foreach my $name (sort keys %bound) {
+            my $oid = $bound{$name};
+            my $obj = $app->object($oid);
+            print '@', $name, ' ', $obj->{'path'}, "\n";
+        }
+    }
+    elsif (@ARGV == 1) {
         my ($what) = @ARGV;
+        $what =~ s/^[@]//;
         my @whats = $what =~ m{^/} ? $app->bound(undef, $what) : $app->bound($what, undef);
         print $_, "\n" for @whats;
     }
     elsif (@ARGV == 2) {
         my ($name, $path) = @ARGV;
+        $name =~ s/^[@]//;
         if (!$app->bound($name, $path)) {
             exit 3;
         }
@@ -718,6 +730,7 @@ sub bound {
     my ($self, $name, $obj) = @_;
     my $dbh = $self->{'dbh'};
     if (!defined $name) {
+        return db_all_bindings($dbh) if !defined $obj;
         return db_bindings_to($dbh, $self->object($obj));
     }
     elsif (!defined $obj) {
@@ -742,7 +755,7 @@ sub get {
     my $dbh = $self->{'dbh'};
     my %want = map { $_ => 1 } @_;
     my @props = grep { !%want || $want{$_->[1]} } db_get_properties($self->{'dbh'}, $o);
-    return map {
+    @props = map {
         my ($op, $k, $v) = @$_;
         $op & IS_REF
             ? [ '@'.$k, db_object($dbh, $v) ]
@@ -750,6 +763,18 @@ sub get {
                   ? [ ':'.$k, $v ]
                   : [ $k, $v     ]
     } @props;
+    return @props;
+}
+
+sub properties {
+    my $self = shift;
+    my @props = $self->get(@_);
+    my %hash;
+    foreach (@props) {
+        my ($k, $v) = @$_;
+        push @{ $hash{$k} ||= [] }, $v;
+    }
+    return \%hash;
 }
 
 sub set {
@@ -789,7 +814,7 @@ sub descendants {
 sub find {
     my ($self, $o) = splice @_, 0, 2;
     my $dbh = $self->{'dbh'};
-    return db_find_objects($dbh, $o, _props(OP_SET|OP_KEY|IS_WILD, @_));
+    return db_find_objects($dbh, $o, _props(OP_SET|OP_REMOVE|OP_KEY|IS_WILD, @_));
 }
 
 sub walk {
@@ -827,6 +852,11 @@ sub cancel {
     my $dbh = $self->{'dbh'};
     $dbh->rollback;
     --$self->{'txlevel'};
+}
+
+sub dbh {
+    my ($self) = @_;
+    return $self->{'dbh'};
 }
 
 # --- Private methods
@@ -1012,6 +1042,17 @@ sub db_bindings_to {
     return @names;
 }
 
+sub db_all_bindings {
+    my ($dbh) = @_;
+    my $sth = $dbh->prepare('SELECT name, ref FROM bindings');
+    $sth->execute;
+    my %bound;
+    while (my ($name, $oid) = $sth->fetchrow_array) {
+        $bound{$name} = $oid;
+    }
+    return %bound;
+}
+
 sub db_binding {
     my ($dbh, $name, $o) = @_;
     my $oid = db_oid($dbh, $o);
@@ -1142,18 +1183,6 @@ sub db_get_descendants {
     return @descendants;
 }
 
-sub db_get_bindings {
-    my ($dbh, $o) = @_;
-    my $obj = db_object($dbh, $o);
-    my $sth = $dbh->prepare('SELECT name FROM bindings WHERE ref = ?');
-    $sth->execute($obj->{'id'});
-    my @names;
-    while (my ($name) = $sth->fetchrow_array) {
-        push @names, $name;
-    }
-    return @names;
-}
-
 sub db_find_objects {
     my $dbh = shift;
     my $root = db_object($dbh, shift);
@@ -1221,15 +1250,15 @@ sub db_find_objects {
     my $sql;
     if (@pparts) {
         $sql = sprintf 'SELECT o.id, o.path, o.parent, p.key FROM objects o INNER JOIN properties p ON o.id = p.object WHERE %s',
-            join(' OR ', @pparts, @oparts);
+            join(' AND ', @pparts, @oparts);
     }
     else {
         $sql = sprintf 'SELECT o.id, o.path, o.parent, 1 FROM objects o WHERE %s',
-            join(' OR ', @oparts);
+            join(' AND ', @oparts);
     }
     if ($start ne '/') {
-        $sql .= ' AND o.path LIKE ?';
-        push @oparams, $start . '%';
+        $sql .= ' AND (o.path = ? OR o.path LIKE ?)';
+        push @oparams, $start, $start . '/%';
     }
     my $sth = $dbh->prepare($sql);
     $sth->execute(@pparams, @oparams);
@@ -1241,7 +1270,7 @@ sub db_find_objects {
     }
     my @objects;
     while (my ($oid, $matched) = each %match) {
-        delete $object{$oid} if scalar(keys %$matched) != @pparts + @oparts;
+        #delete $object{$oid} if scalar(keys %$matched) != @pparts + @oparts;
     }
     return values %object;
 }
@@ -1288,7 +1317,7 @@ sub _props {
             $op |= IS_INTRIN if $2 eq ':';
             if (!defined $v) {
                 if ($op & OP_REMOVE) {
-                    push @props, [ $op, $k ];
+                    push @props, [ $op | OP_KEY, $k ];
                 }
                 elsif ($modes & OP_KEY) {
                     push @props, [ OP_KEY, $k ];
