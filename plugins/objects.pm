@@ -1,4 +1,4 @@
-package App::sw::Plugin::user;
+package App::sw::Plugin::objects;
 
 use strict;
 use warnings;
@@ -15,10 +15,10 @@ sub app { shift()->{'app'} }
 
 sub commands {
     return (
-        'users' => \&users, 'user' => \&user,
-        'groups' => \&groups, 'group' => \&group,
-        'machines' => \&machines, 'machine' => \&machine,
-        'hosts' => \&hosts, 'host' => \&host,
+        'users' => \&users,         'user' => \&user,
+        'groups' => \&groups,       'group' => \&group,
+        'machines' => \&machines,   'machine' => \&machine,
+        'hosts' => \&hosts,         'host' => \&host,
         'resources' => \&resources, 'resource' => \&resource,
     );
 }
