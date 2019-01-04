@@ -27,7 +27,7 @@ sub hooks { }
 
 sub howto {
     my $self = shift;
-    $self->app->orient;
+    $self->app->getopts;
     if (@ARGV == 1) {
         $self->list_howtos(@ARGV);
     }
@@ -151,7 +151,7 @@ sub set_howto {
 sub find_objects {
     my ($self, $name) = @_;
     my $app = $self->app;
-    my $cpath = $app->bound('config')
+    my ($cpath) = $app->bound('config')
         or fatal("unable to resolve $name: \@config is not bound");
     1;
     return find_path_to_machine("$cpath/machine"),
