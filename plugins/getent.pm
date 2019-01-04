@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 *usage = *App::sw::main::usage;
-*orient = *App::sw::main::orient;
 
 my $usagestr = 'getent hosts | host HOST | users | user USER | ...';
 
@@ -36,7 +35,7 @@ sub getent_hosts {
     my $app = $self->app;
     my $hpfx = '/host';
     my $file = '/etc/hosts';
-    $self->app->orient(
+    $self->app->getopts(
         'p=s' => \$hpfx,
         'f=s' => \$file,
     );
@@ -68,7 +67,7 @@ sub getent_passwd {
     my $app = $self->app;
     my $upfx = '/user';
     my $file = '/etc/passwd';
-    $self->app->orient(
+    $self->app->getopts(
         'p=s' => \$upfx,
         'f=s' => \$file,
     );

@@ -3,9 +3,6 @@ package App::sw::Plugin::objects;
 use strict;
 use warnings;
 
-*usage = *App::sw::main::usage;
-*fatal = *App::sw::main::fatal;
-
 sub new {
     my $cls = shift;
     bless { @_ }, $cls;
@@ -15,23 +12,17 @@ sub app { shift()->{'app'} }
 
 sub commands {
     return (
-        'users' => \&users,         'user' => \&user,
-        'groups' => \&groups,       'group' => \&group,
-        'machines' => \&machines,   'machine' => \&machine,
-        'hosts' => \&hosts,         'host' => \&host,
+        'users' => \&users, 'user' => \&user,
+        'groups' => \&groups, 'group' => \&group,
+        'machines' => \&machines, 'machine' => \&machine,
+        'hosts' => \&hosts, 'host' => \&host,
+        'networks' => \&networks, 'network' => \&network,
         'resources' => \&resources, 'resource' => \&resource,
+        'organizations' => \&organizations, 'organization' => \&organization,
     );
 }
 
 sub hooks { }
-
-sub machines {
-    shift()->_list_objects('machines');
-}
-
-sub hosts {
-    shift()->_list_objects('hosts');
-}
 
 sub users {
     shift()->_list_objects('users');
@@ -41,24 +32,61 @@ sub groups {
     shift()->_list_objects('groups');
 }
 
+sub machines {
+    shift()->_list_objects('machines');
+}
+
+sub hosts {
+    shift()->_list_objects('hosts');
+}
+
+sub networks {
+    shift()->_list_objects('networks');
+}
+
 sub resources {
     shift()->_list_objects('resources');
+}
+
+sub organizations {
+    shift()->_list_objects('organizations');
+}
+
+sub machine {
+    my $self = shift;
+    my $app = $self->app;
+    my ($long);
+    $app->getopts(
+        'l|long' => \$long,
+    );
+    $app->usage('machine [-l] NAME') if @ARGV != 1;
+    my ($name) = @ARGV;
+    my @machines = $self->find('machines', $name)
+        or $app->fatal("no such machine: $name");
+    print $_, "\n" for sort map { $_->{'path'} } @machines;
 }
 
 sub _list_objects {
     my ($self, $what) = @_;
     my $app = $self->app;
-    my ($long);
-    $app->orient(
+    my ($long, $roots);
+    $app->getopts(
         'l|long' => \$long,
+        'r|roots' => \$roots,
     );
-    usage("$what [-l]") if @ARGV;
-    my @objects = $self->all($what);
-    if ($long) {
-        print $_, "\n" for sort map { $_->{'path'} } @objects;
+    $app->usage("$what [-lr]") if @ARGV;
+    if ($roots) {
+        my @roots = $self->roots($what);
+        print $_, "\n" for sort @roots;
     }
     else {
-        print $_, "\n" for sort map { basename($_->{'path'}) } @objects;
+        my @objects = $self->all($what);
+        if ($long) {
+            print $_, "\n" for sort map { $_->{'path'} } @objects;
+        }
+        else {
+            print $_, "\n" for sort map { basename($_->{'path'}) } @objects;
+        }
     }
 }
 
@@ -66,14 +94,14 @@ sub user {
     my $self = shift;
     my $app = $self->app;
     my ($long, $passwd);
-    $app->orient(
+    $app->getopts(
         'l|long' => \$long,
         'p|passwd' => \$passwd,
     );
-    usage('user [-l] USERNAME') if @ARGV != 1;
+    $app->usage('user [-l] USERNAME') if @ARGV != 1;
     my ($name) = @ARGV;
     my @users = $self->find('users', $name)
-        or fatal("no such user: $name");
+        or $app->fatal("no such user: $name");
     if ($passwd) {
         print $self->user2passwd($_), "\n" for @users;
     }
@@ -88,11 +116,12 @@ sub user2passwd {
     my ($self, $user) = @_;
     my $props = $self->app->properties($user);
     my $username = basename($user->{'path'});
+    my $app = $self->app;
     my ($uid, $gid, $home) = map {
         my $values = $props->{$_};
-        fatal("no $_ for $user")
+        $app->fatal("no $_ for $user")
             if !$values || !@$values;
-        fatal("multiple $_ for $user")
+        $app->fatal("multiple $_ for $user")
             if @$values > 1;
         $values->[0];
     } qw(uid gid home);
@@ -103,12 +132,18 @@ sub user2passwd {
     return join(':', $username, 'x', $uid, $gid, $gecos, $home, $shell);
 }
 
+sub roots {
+    my ($self, $what) = @_;
+    my $app = $self->app;
+    return map { $_->[0] eq '@root' ? ($_->[1]{'path'}) : () }
+           map { $app->get("$_/$what") }
+           $app->bound('config');
+}
+
 sub all {
     my ($self, $what, $name) = @_;
     my $app = $self->app;
-    my @roots = map { $_->[0] eq '@root' ? ($_->[1]{'path'}) : () }
-                map { $app->get("$_/$what") }
-                $app->bound('config');
+    my @roots = $self->roots($what);
     return map { $app->children($_) } @roots;
 }
 

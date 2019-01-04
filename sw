@@ -33,8 +33,15 @@ sub fatal;
 my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = DB_FILE;
+(my $dbext = $dbfile) =~ s/.+\.//;
 my (%command, %hook);
-my $app = App::sw->new('file' => "$dir/$dbfile");
+my $app = App::sw->new(
+    'dir' => $dir,
+    'dbfile' => "$dir/$dbfile",
+    'dbext' => $dbext,
+);
+chdir $dir or fatal "chdir $dir: $!";
+$app->open if -e $dbfile;
 
 init_commands();
 App::sw->init_plugins(PLUGIN_DIR);
@@ -60,20 +67,22 @@ sub cmd_init {
         if -e "$dir/$dbfile";
     -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
     chdir $dir or fatal "chdir $dir: $!";
-    $app->create($dbfile);
+    $app->initdb(
+        'dbfile' => $dbfile,
+    );
     print STDERR "initialized: $dir\n";
 }
 
 sub cmd_dbi {
     #@ dbi :: open database using sqlite3
-    orient();
+    getopts();
     usage if @ARGV;
     undef $app;
     exec('sqlite3', $dbfile);
 }
 
 ### sub cmd_dbq {
-###     orient();
+###     getopts();
 ###     usage if !@ARGV;
 ###     my $sql = shift @ARGV;
 ###     my $sth = sth($sql);
@@ -92,7 +101,7 @@ sub cmd_add {
     #@ add PATH [KEY=VAL]...
     #@ add '[' PATH... ']' [KEY=VAL]...
     #= add a node
-    orient();
+    getopts();
     $app->_transact(sub {
         foreach my $path (argv_pathlist()) {
             $app->insert($path, @ARGV);
@@ -104,7 +113,7 @@ sub cmd_set {
     #@ set PATH KEY=VAL...
     #@ set '[' PATH... ']' KEY=VAL...
     #= set node properties
-    orient();
+    getopts();
     my @paths = argv_pathlist();
     usage() if !@ARGV;
     $app->_transact(sub {
@@ -116,7 +125,7 @@ sub cmd_set {
 
 sub cmd_append {
     #@ append PATH KEY=VAL...
-    orient();
+    getopts();
     my $path = argv_path();
     $app->append($path, @ARGV);
     #my @props = argv_props(OP_SET);
@@ -126,7 +135,7 @@ sub cmd_append {
 sub cmd_rm {
     #@ rm [-r] PATH...
     my $recurse;
-    orient(
+    getopts(
         'r|recurse' => \$recurse,
     );
     usage if @ARGV == 0;
@@ -146,7 +155,7 @@ sub cmd_rm {
 
 sub cmd_mv {
     #@ mv PATH... NEWPARENT/
-    orient();
+    getopts();
     usage if @ARGV < 2;
     my $dest = pop @ARGV;
     if ($dest =~ m{/$}) {
@@ -189,7 +198,7 @@ sub cmd_mv {
 sub cmd_ls {
     #@ ls [-lf] [PATH...]
     my ($long, $full);
-    orient(
+    getopts(
         'l|long' => \$long,
         'f|full-path' => \$full,
     );
@@ -213,7 +222,7 @@ sub cmd_ls {
 sub cmd_tree {
     #@ tree [PATH...]
     my $maxlevel = 999;
-    orient(
+    getopts(
         'M=i' => \$maxlevel,
         '1' => sub { $maxlevel = 1 },
     );
@@ -238,7 +247,7 @@ sub cmd_tree {
 sub cmd_get {
     #@ get [-hpk] [PATH...]
     my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0, 'intrinsics' => 0 );
-    orient(
+    getopts(
         'h|header' => \$opt{'header'},
         'p|path' => \$opt{'path'},
         'k|keys' => \$opt{'keys'},
@@ -263,7 +272,7 @@ sub cmd_export {
     # TODO: sort by id to ensure ref integrity when importing!?
     my %opt = ( 'header' => 1, 'keys' => 1, 'intrinsics' => 0 );
     my $maxlevel = 999;
-    orient(
+    getopts(
         'i|intrinsics' => \$opt{'intrinsics'},
         'M=i' => \$maxlevel,
         '0' => sub { $maxlevel = 0 },
@@ -312,7 +321,7 @@ sub _dump_object {
 sub cmd_bind {
     #@ bind NAME PATH
     #= bind a name to a node
-    orient();
+    getopts();
     usage if @ARGV != 2;
     my $name = shift @ARGV;
     my $path = argv_path();
@@ -327,7 +336,7 @@ sub cmd_bound {
     #= print path of the node to which NAME is bound
     #@ bound NAME PATH
     #= check if NAME is bound to PATH
-    orient();
+    getopts();
     if (@ARGV == 0) {
         my %bound = $app->bound;
         foreach my $name (sort keys %bound) {
@@ -358,7 +367,7 @@ sub cmd_import {
     #@ import [-i INTERVAL]
     #= import nodes
     my $commit_interval = 100;
-    orient(
+    getopts(
         'i|commit-every=i' => \$commit_interval,
     );
     local $/ = '';
@@ -392,7 +401,7 @@ sub cmd_find {
     #@ find [-1] [PATH] [KEY=VAL...]
     #@ find [-1] '[' PATH... ']' [KEY=VAL...]
     my ($single, $print_value);
-    orient(
+    getopts(
         '1' => \$single,
         'v' => \$print_value,
     );
@@ -433,7 +442,7 @@ sub cmd_find {
 sub cmd_config {
     #@ config [--program | --prefix | --db-dir | --db-file | --plugin-dir | --env-var]...
     unshift @ARGV, '--' if @ARGV && $ARGV[0] =~ /^-/;
-    orient();
+    getopts();
     my %config = (
         'program' => PROG,
         'prefix' => PREFIX,
@@ -453,7 +462,7 @@ sub cmd_config {
 
 sub cmd_exists {
     #@ exists PATH... :: check if node(s) exist
-    orient();
+    getopts();
     foreach my $path (@ARGV) {
         exit 2 if !$app->is_present($path);
     }
@@ -461,16 +470,11 @@ sub cmd_exists {
 
 # --- Other functions
 
-sub orient {
+sub getopts {
     return if $running;
     GetOptions(
-        'd|directory=s' => \$dir,
         @_,
     ) or usage;
-    chdir $dir or fatal "chdir $dir: $!";
-    if (-e $dbfile) {
-        $app->open($dbfile);
-    }
     $running = 1;
 }
 
@@ -615,9 +619,9 @@ my %op2int;
 
 sub new {
     my $cls = shift;
-    unshift @_, 'file' if @_ % 2;
+    unshift @_, 'dbfile' if @_ % 2;
     my %self = @_;
-    die "db file not specified" if !defined $self{'file'};
+    die "db file not specified" if !defined $self{'dbfile'};
     %op2int = (
         '='  => OP_SET,
         '+'  => OP_APPEND,
@@ -633,10 +637,22 @@ sub new {
     bless \%self, $cls;
 }
 
-sub create {
+sub dir {
+    my ($self) = @_;
+    return $self->{'dir'};
+}
+
+sub dbfile {
+    my ($self, $name) = @_;
+    my $file = $self->{'dbfile'};
+    return $file if !defined $name;
+    return sprintf '%s/%s.%s', $self->{'dir'}, $name, $self->{'dbext'};
+}
+
+sub initdb {
     my $proto = shift;
     my $self = ref $proto ? $proto : $proto->new(@_);
-    my $file = $self->{'file'};
+    my $file = $self->{'dbfile'};
     die "db file $file already exists" if -e $file;
     return $self->connect($file)->initialize;
 }
@@ -644,9 +660,10 @@ sub create {
 sub open {
     my $proto = shift;
     my $self = ref $proto ? $proto : $proto->new(@_);
-    my $file = $self->{'file'};
-    die "db file $file doesn't exist" if ! -e $file;
-    return $self->connect($file);
+    return if $self->{'dbh'};
+    my $dbfile = $self->{'dbfile'};
+    die "db file $dbfile doesn't exist" if ! -e $dbfile;
+    return $self->connect($dbfile);
 }
 
 sub connect {
@@ -654,6 +671,19 @@ sub connect {
     my $dbh = $self->{'dbh'} = (DBI->connect("dbi:SQLite:dbname=$file",'','') or die "connect failed");
     $dbh->{'RaiseError'} = 1;
     $dbh->do('pragma foreign_keys=on');
+    return $self;
+}
+
+sub attach {
+    my ($self, $name) = @_;
+    $self->open;  # Make sure we've connected to the main DB
+    die "attach $name: reserved name"
+        if $name eq 'main' || $name eq 'temp';
+    my $file = $self->dbfile($name);
+    my $dbh = $self->dbh;
+    my $sql = q{ATTACH DATABASE ? AS ?};
+    my $sth = $dbh->prepare($sql);
+    $sth->execute($file, $name);
     return $self;
 }
 
@@ -775,6 +805,19 @@ sub properties {
         push @{ $hash{$k} ||= [] }, $v;
     }
     return \%hash;
+}
+
+sub property {
+    my ($self, $path, $key) = @_;
+    my $dbh = $self->dbh;
+    if (wantarray) {
+        my @vals = db_get_property($dbh, $path, $key);
+        return @vals;
+    }
+    else {
+        my $val = db_get_property($dbh, $path, $key);
+        return $val;
+    }
 }
 
 sub set {
@@ -1116,6 +1159,24 @@ sub db_path {
     return db_object($dbh, $o)->{'path'};
 }
 
+sub db_get_property {
+    my ($dbh, $o, $k) = @_;
+    my $obj = db_object($dbh, $o);
+    my $oid = db_oid($dbh, $obj);
+    my $path = db_path($dbh, $obj);
+    my $sth = $dbh->prepare('SELECT val, ref FROM properties WHERE object = ? AND key = ? ORDER BY key, val, ref');
+    $sth->execute($oid, $k);
+    my @vals;
+    while (my ($v, $r) = $sth->fetchrow_array) {
+        $v = db_object($dbh, $r) if $r;
+        return $v if !wantarray;
+        push @vals, $v;
+    }
+    $sth->finish;
+    return if !wantarray;
+    return @vals;
+}
+
 sub db_get_properties {
     my ($dbh, $o) = @_;
     my $obj = db_object($dbh, $o);
@@ -1412,15 +1473,26 @@ sub init_plugins {
                     if exists $hook{$hook};
                 $hook{$hook} = sub { $sub->($plugin) };
             }
+            $plugin->init if $plugin->can('init');
             1;  # OK
         };
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
     }
 }
 
-sub orient {
+sub usage {
     my $self = shift;
-    goto &App::sw::main::orient;
+    goto &App::sw::main::usage;
+}
+
+sub fatal {
+    my $self = shift;
+    goto &App::sw::main::fatal;
+}
+
+sub getopts {
+    my $self = shift;
+    goto &App::sw::main::getopts;
 }
 
 # --- Testing code
@@ -1429,10 +1501,12 @@ sub test {
     my $dbfile = @ARGV ? shift @ARGV : 'test.db';
     my $app;
     if (-e $dbfile) {
-        $app = App::sw->open($dbfile);
+        $app = App::sw->open('dbfile' => $dbfile);
     }
     else {
-        $app = App::sw->create($dbfile);
+        $app = App::sw->initdb(
+            'dbfile' => $dbfile,
+        );
         $app->insert('/user/fishwick',
             'name' => 'Ulysses K. Fishwick',
             'age' => '3',
