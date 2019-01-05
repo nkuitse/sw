@@ -44,7 +44,7 @@ chdir $dir or fatal "chdir $dir: $!";
 $app->open if -e $dbfile;
 
 init_commands();
-App::sw->init_plugins(PLUGIN_DIR);
+$app->init_plugins(PLUGIN_DIR);
 
 my ($cmd, $running);
 @ARGV = qw(shell) if !@ARGV;
@@ -1453,14 +1453,14 @@ sub _ancestor_paths {
 }
 
 sub init_plugins {
-    my ($cls, $dir) = @_;
+    my ($self, $dir) = @_;
     foreach my $f (glob($dir . '/*.pm')) {
         warning("invalid plugin file name: $f"), next
             if $f !~ m{/([a-z]+)\.pm$};
         my ($name, $cls) = ($1, "App::sw::Plugin::$1");
         my $ok = eval {
             require $f;
-            my $plugin = $cls->new('app' => $app);
+            my $plugin = $cls->new('app' => $self);
             my %c = eval { $plugin->commands };
             my %h = eval { $plugin->hooks };
             while (my ($cmd, $sub) = each %c) {
@@ -1493,42 +1493,5 @@ sub fatal {
 sub getopts {
     my $self = shift;
     goto &App::sw::main::getopts;
-}
-
-# --- Testing code
-
-sub test {
-    my $dbfile = @ARGV ? shift @ARGV : 'test.db';
-    my $app;
-    if (-e $dbfile) {
-        $app = App::sw->open('dbfile' => $dbfile);
-    }
-    else {
-        $app = App::sw->initdb(
-            'dbfile' => $dbfile,
-        );
-        $app->insert('/user/fishwick',
-            'name' => 'Ulysses K. Fishwick',
-            'age' => '3',
-            'nick' => 'fishwick',
-        );
-        $app->bind('fishwick', '/user/fishwick');
-        $app->insert('/user/fishwick/home/foo',
-            'foo' => 'bar',
-            'friend' => 'sid',
-            'friend' => 'nancy',
-        );
-        1;
-    }
-    @ARGV = ('@fishwick/home/foo') if !@ARGV;
-    foreach (@ARGV) {
-        my $obj = $app->object($_);
-        my @props = $app->get($obj);
-        print $obj->{'path'}, "\n";
-        foreach (@props) {
-            print join('=', @$_), "\n";
-        }
-        print "\n";
-    }
 }
 
