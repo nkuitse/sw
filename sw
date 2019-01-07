@@ -81,18 +81,19 @@ sub cmd_dbi {
     exec('sqlite3', $dbfile);
 }
 
-### sub cmd_dbq {
-###     getopts();
-###     usage if !@ARGV;
-###     my $sql = shift @ARGV;
-###     my $sth = sth($sql);
-###     $sth->execute(@ARGV);
-###     while (my @row = map { defined $_ ? $_ : '' } $sth->fetchrow_array) {
-###         print join("\t", @row), "\n";
-###     }
-###     $sth->finish;
-### }
-### 
+sub cmd_dbq {
+    #@ dbq [SQL] :: execute an SQL statement
+    getopts();
+    my $sql = @ARGV ? shift(@ARGV) : do { undef $/; scalar <STDIN> };
+    my $dbh = $app->dbh;
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@ARGV);
+    while (my @row = map { defined $_ ? $_ : '' } $sth->fetchrow_array) {
+        print join("\t", @row), "\n";
+    }
+    $sth->finish;
+}
+
 ### sub cmd_query {
 ###     goto &cmd_dbq;
 ### }
