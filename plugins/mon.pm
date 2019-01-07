@@ -3,6 +3,9 @@ package App::sw::Plugin::mon;
 use strict;
 use warnings;
 
+use Text::ParseWords;
+use IO::Select;
+
 {
     no warnings;
     *usage = *App::sw::main::usage;
@@ -115,7 +118,7 @@ sub mon_next {
     $app->getopts(
         'l|long' => \$long,
     );
-    $app->usage('next [-l] [TARGET [TEST]]') if @ARGV != 2;
+    $app->usage('next [-l] [TARGET [TEST]]') if @ARGV < 1 || @ARGV > 2;
     my $dbh = $app->dbh;
     my ($target, $tester) = @ARGV;
     my $out = $self->_next(@ARGV);
@@ -151,7 +154,7 @@ sub mon_schedule {
         AND     x.path = ?
     };
     my $sth = $dbh->prepare($sql);
-    $sth->execute($sql, $target, $tester);
+    $sth->execute($target, $tester);
     my ($t, $o, $x) = $sth->fetchrow_array;
     $sth->finish;
     my @params;
@@ -164,6 +167,8 @@ sub mon_schedule {
         @params = ($time, $t);
     }
     else {
+        $o = $app->object($target)->{'id'};
+        $x = $app->object($tester)->{'id'};
         $sql = q{
             INSERT INTO mon.tests
                 (target, tester, state, next)
@@ -234,9 +239,94 @@ sub mon_run {
     my $self = shift;
     my $app = $self->app;
     $app->getopts;
-    $app->_transact(sub {
-        1;
-    });
+    $app->usage('run TARGET [TEST...]') if !@ARGV;
+    my $o = shift @ARGV;
+    my $target = $app->object($o);
+    $target->{'properties'} = $app->properties($target);
+    @ARGV = tests_for($target) if !@ARGV;
+    my $select = IO::Select->new;
+    my (@running, @finish, @done);
+    foreach my $t (@ARGV) {
+        my $test = $app->object($t);
+        my $props = $test->{'properties'} = $app->properties($test);
+        my $cmd = $props->{'cmd'} || die;
+        die if @$cmd > 1;
+        $cmd = $cmd->[0];
+        my @cmd = shellwords($cmd);
+        my %var = (
+            'target' => $target,
+            'test' => $test,
+        );
+        for (@cmd) {
+            s/^[%]\((.+)\)$/expand($1, \%var)/e;
+        }
+        open my $fh, '-|', @cmd or die;
+        $select->add($fh);
+        push @running, {
+            'fh' => $fh,
+            'target' => $o,
+            'test' => $t,
+            'result' => undef,
+        };
+    }
+    while (@running) {
+        my @ready = $select->can_read;
+        foreach my $fh (@ready) {
+            my ($test) = grep { $_->{'fh'} eq $fh } @running;
+            my $out = <$fh>;
+            if (defined $out) {
+                chomp $out;
+                $test->{'result'} = $1 if $out =~ /^(OK|ERR|WARN)/;
+                push @finish, $test;
+            }
+            else {
+                $select->remove($fh);
+                $test->{'result'} = close($fh) ? 'OK' : 'ERR';
+            }
+            @running = grep { $_->{'fh'} ne $fh } @running;
+        }
+    }
+    while (@finish) {
+        my @ready = $select->can_read;
+        foreach my $fh (@ready) {
+            my ($test) = grep { $_->{'fh'} eq $fh } @finish;
+            my $out = <$fh>;
+            if (!defined $out) {
+                $test->{'result'} = close($fh) ? 'OK' : 'ERR';
+                @finish = grep { $_->{'fh'} ne $fh } @finish;
+                push @done, $test;
+            }
+        }
+    }
+    foreach (@done) {
+        my ($o, $t, $result) = @$_{qw(target test result)};
+        print join(' ', $result, $o, $t), "\n";
+        # TODO update status
+    }
+}
+
+sub expand {
+    my ($str, $var) = @_;
+    my $h = $var;
+    if ($str =~ s{^(\w+)}{}) {
+        $h = $h->{$1} or die;
+    }
+    if ($str =~ s{^\.(\w+)}{}) {
+        my $v = $h->{'properties'}{$1};
+        die if !defined $v;
+        return $v if !ref $v;
+        return $v->[0] if ref($v) eq 'ARRAY';
+        die;
+    }
+    else {
+        return $h->{'properties'}{':name'};
+    }
+}
+
+sub tests_for {
+    my ($obj) = @_;
+    my @props = @{ $obj->{'properties'}{'@test'} || [] };
+    return map { $_->{'path'} } @props;
 }
 
 sub initdb {
