@@ -35,16 +35,11 @@ my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = DB_FILE;
 (my $dbext = $dbfile) =~ s/.+\.//;
 my (%command, %hook);
-my $app = App::sw->new(
-    'dir' => $dir,
-    'dbfile' => "$dir/$dbfile",
-    'dbext' => $dbext,
-);
-chdir $dir or fatal "chdir $dir: $!";
-$app->open if -e $dbfile;
+my $app;
 
-init_commands();
-$app->init_plugins(PLUGIN_DIR);
+chdir $dir or fatal "chdir $dir: $!";
+
+init();
 
 my ($cmd, $running);
 @ARGV = qw(shell) if !@ARGV;
@@ -261,6 +256,7 @@ sub cmd_get {
         my %want = map { $_ => 1 } @ARGV;
         @props = grep { $want{$_->[0]} } @props;
         $opt{'sort'} = [ @ARGV ];
+        $opt{'intrinsics'} = 1 if grep { /^:/ } keys %want;
     }
     else {
         $opt{'keys'} = 1;
@@ -429,11 +425,10 @@ sub cmd_find {
             }
         }
     }
-    elsif ($single) {
-        usage();
-    }
     else {
         foreach my $path (@start) {
+            $path = $app->object($path)->{'path'}
+                if $path =~ /\[[@]/;
             print $path, "\n";
             print $_->{'path'}, "\n" for $app->descendants($path);
         }
@@ -470,6 +465,21 @@ sub cmd_exists {
 }
 
 # --- Other functions
+
+sub init {
+    if ($app) {
+        $app->close;
+    }
+    $app = App::sw->new(
+        'dir' => $dir,
+        'dbfile' => "$dir/$dbfile",
+        'dbext' => $dbext,
+        'init' => \&init,
+    );
+    $app->open if -e $dbfile;
+    init_commands();
+    $app->init_plugins(PLUGIN_DIR);
+}
 
 sub getopts {
     return if $running;
@@ -534,7 +544,7 @@ sub argv_pathlist {
 
 sub path {
     my ($path) = @_;
-    $path =~ m{^/$|^(/\w[-.\w+]*)+$} or fatal "invalid object path: $path";
+    $path =~ m{^/$|^(/\w[-.\w+]*)+(?:\[[@]\w+\])*$} or fatal "invalid object path: $path";
     return $path;
 }
 
@@ -665,6 +675,12 @@ sub open {
     my $dbfile = $self->{'dbfile'};
     die "db file $dbfile doesn't exist" if ! -e $dbfile;
     return $self->connect($dbfile);
+}
+
+sub close {
+    my ($self) = @_;
+    $self->{'dbh'}->disconnect;
+    delete $self->{'dbh'};
 }
 
 sub connect {
@@ -1109,8 +1125,9 @@ sub db_binding {
 sub db_object {
     my ($dbh, $o, $check_only) = @_;
     return $o if ref $o;
-    my ($sth, @params);;
+    my ($sth, @params, @etc);
     if ($o =~ m{^/}) {
+        ($o, @etc) = split /(?=\[[@])/, $o;
         $sth = $dbh->prepare('SELECT id, path, parent FROM objects WHERE path = ?');
         @params = ($o);
     }
@@ -1143,6 +1160,26 @@ sub db_object {
     my $obj = $sth->fetchrow_hashref;
     $sth->finish;
     die "no such object: $o" if !$obj && !$check_only;
+    if (@etc) {
+        my $sql = q{
+            SELECT  ro.id, ro.path, ro.parent
+            FROM    objects o, objects ro, properties p
+            WHERE   o.id = p.object
+            AND     ro.id = p.ref
+            AND     o.id = ?
+            AND     p.key = ?
+        };
+        $sth = $dbh->prepare($sql);
+        my $ostr = db_path($dbh, $obj);
+        foreach my $e (@etc) {
+            $ostr .= $e;
+            $e =~ s/^\[[@]// or die;
+            $e =~ s/\]$// or die;
+            $sth->execute(db_oid($dbh, $obj), $e);
+            $obj = $sth->fetchrow_hashref
+                or die "no such object: $ostr";
+        }
+    }
     return $obj;
 }
 
@@ -1455,6 +1492,7 @@ sub _ancestor_paths {
 
 sub init_plugins {
     my ($self, $dir) = @_;
+    my @plugins;
     foreach my $f (glob($dir . '/*.pm')) {
         warning("invalid plugin file name: $f"), next
             if $f !~ m{/([a-z]+)\.pm$};
@@ -1475,10 +1513,18 @@ sub init_plugins {
                 $hook{$hook} = sub { $sub->($plugin) };
             }
             $plugin->init if $plugin->can('init');
+            push @plugins, $plugin;
             1;  # OK
         };
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
     }
+    $self->{'plugins'} = \@plugins;
+}
+
+sub spawn {
+    my ($self, $sub) = @_;
+    $self->{'init'}->();
+    $sub->();
 }
 
 sub usage {
