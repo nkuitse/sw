@@ -403,6 +403,7 @@ sub cmd_find {
         'v' => \$print_value,
     );
     s{^:/}{:name=} for @ARGV;
+    s{^\@/}{\@*=/} for @ARGV;
     my @start = argv_pathlist(1);
     @start = qw(/) if !@start;
     if (@ARGV) {
