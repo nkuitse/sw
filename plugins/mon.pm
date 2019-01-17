@@ -54,58 +54,16 @@ sub mon_ls {
     );
 }
 
-sub _next {
-    my ($self, $target, $tester) = @_;
-    my ($sql, @params);
-    if (!defined $target) {
-        $sql = q{
-            SELECT  t.next,
-                    o.path,
-                    x.path
-            FROM    mon.tests    t,
-                    main.objects o,
-                    main.objects x
-            WHERE   t.target = o.id
-            AND     t.tester = x.id
-            AND     t.next IS NOT NULL
-        };
-    }
-    elsif (!defined $tester) {
-        $sql = q{
-            SELECT  t.next,
-                    o.path,
-                    x.path
-            FROM    mon.tests    t,
-                    main.objects o,
-                    main.objects x
-            WHERE   t.target = o.id
-            AND     t.tester = x.id
-            AND     o.path = ?
-            AND     t.next IS NOT NULL
-        };
-        @params = ($target);
-    }
-    else {
-        $sql = q{
-            SELECT  t.next,
-                    o.path,
-                    x.path
-            FROM    mon.tests    t,
-                    main.objects o,
-                    main.objects x
-            WHERE   t.target = o.id
-            AND     t.tester = x.id
-            AND     o.path = ?
-            AND     x.path = ?
-            AND     t.next IS NOT NULL
-        };
-        @params = ($target, $tester);
-    }
-    my $dbh = $self->app->dbh;
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
+sub next {
+    my $self = shift;
+    my $app = $self->app;
+    my $dbh = $app->dbh;
+    my @next = db_next($dbh, @_);
     my %out;
-    while (my ($next, $opath, $xpath) = $sth->fetchrow_array) {
+    foreach my $t (@next) {
+        my ($next, $target, $tester) = @$t{qw(next target tester)};
+        my $opath = App::sw::db_path($dbh, $target);
+        my $xpath = App::sw::db_path($dbh, $tester);
         $out{$opath}{$xpath} = $next;
     }
     return \%out;
@@ -118,10 +76,10 @@ sub mon_next {
     $app->getopts(
         'l|long' => \$long,
     );
-    $app->usage('next [-l] [TARGET [TEST]]') if @ARGV < 1 || @ARGV > 2;
+    $app->usage('next [-l] [TARGET [TEST]]') if @ARGV > 2;
     my $dbh = $app->dbh;
     my ($target, $tester) = @ARGV;
-    my $out = $self->_next(@ARGV);
+    my $out = $self->next(@ARGV);
     foreach my $o (sort keys %$out) {
         my $xhash = $out->{$o};
         foreach my $x (sort keys %$xhash) {
@@ -134,51 +92,69 @@ sub mon_next {
     }
 }
 
+sub db_schedule_test {
+    my ($dbh, $test, $time) = @_;
+    my $tid = App::sw::db_oid($dbh, $test);
+    my $sth = $dbh->prepare($dbh, 'UPDATE mon.tests SET next = ? WHERE id = ?');
+    $sth->execute($time, $tid);
+}
+
+sub db_record_test_result {
+    my ($dbh, $test, $status) = @_;
+    my $tid = db_test_id($dbh, $test);
+    my $state = eval { db_test_state($dbh, $test) };
+    my $time = time;
+    if (defined $state && $state->{'status'} eq $status) {
+        my $sth = $dbh->prepare('UPDATE mon.states SET last = ? WHERE id = ?');
+        $sth->execute($time, $state->{'id'});
+    }
+    else {
+        my $sth = $dbh->prepare(q{
+            INSERT INTO mon.states (test, status, first, last)
+            VALUES  (?, ?, ?, ?)
+        });
+        $sth->execute($tid, $status, $time, $time);
+        my $sid = $dbh->last_insert_id('', '', '', '');
+        $sth = $dbh->prepare('UPDATE mon.tests SET state = ? WHERE id = ?');
+        $sth->execute($sid, $tid);
+    }
+}
+
+sub db_test_state {
+    my $dbh = shift;
+    my $test = db_test($dbh, @_);
+    my $tid = db_test_id($dbh, $test);
+    my $sth = $dbh->prepare(q{
+        SELECT  s.*
+        FROM    mon.tests t,
+                mon.states s
+        WHERE   t.state = s.id
+        AND     t.id = ?
+    });
+    $sth->execute($tid);
+    my $state = $sth->fetchrow_hashref;
+    $sth->finish;
+    if (!defined $state) {
+        my ($opath, $xpath) = map { App::sw::db_path($dbh, $_) } @$test{qw(target tester)};
+        die "test $xpath of $opath has no state";
+    }
+    return $state;
+}
+
 sub mon_schedule {
     my ($self) = @_;
     my $app = $self->app;
     $app->usage('schedule TIME TARGET TEST') if @ARGV != 3;
     my ($time, $target, $tester) = @ARGV;
-    $time = time + dur2sec($time) if $time =~ s/^\+//;
     my $dbh = $app->dbh;
-    my $sql = q{
-        SELECT  t.id,
-                o.id,
-                x.id
-        FROM    mon.tests t,
-                objects   o,
-                objects   x
-        WHERE   t.target = o.id
-        AND     t.tester = x.id
-        AND     o.path = ?
-        AND     x.path = ?
-    };
-    my $sth = $dbh->prepare($sql);
-    $sth->execute($target, $tester);
-    my ($t, $o, $x) = $sth->fetchrow_array;
-    $sth->finish;
-    my @params;
-    if (defined $t) {
-        $sql = q{
-            UPDATE  mon.tests
-            SET     next = ?
-            WHERE   id = ?
-        };
-        @params = ($time, $t);
+    my $test = db_test($dbh, $target, $tester) || db_create_test($dbh, $target, $tester);
+    if ($time =~ s/^\+//) {
+        $time = time + dur2sec($time);
     }
-    else {
-        $o = $app->object($target)->{'id'};
-        $x = $app->object($tester)->{'id'};
-        $sql = q{
-            INSERT INTO mon.tests
-                (target, tester, state, next)
-            VALUES
-                (?, ?, ?, ?)
-        };
-        @params = ($o, $x, undef, $time);
+    elsif ($time !~ /^[0-9]+/) {
+        $app->fatal("unrecognized time: $time");
     }
-    $sth = $dbh->prepare($sql);
-    $sth->execute(@params);
+    db_schedule_test($test, $time);
 }
 
 sub mon_status {
@@ -191,51 +167,124 @@ sub mon_status {
     $app->usage('status [-l] TARGET [TEST]') if @ARGV < 1 || @ARGV > 2;
     my ($target, $tester) = @ARGV;
     my $dbh = $app->dbh;
-    my ($sql, @params);
-    if (!defined $tester) {
-        $sql = q{
-            SELECT  s.status,
-                    s.first,
-                    s.last,
-                    x.path
-            FROM    mon.tests    t,
-                    mon.states   s,
-                    main.objects o,
-                    main.objects x
-            WHERE   t.target = o.id
-            AND     t.tester = x.id
-            AND     t.state  = s.id
-            AND     o.path = ?
-        };
-        @params = ($target);
-    }
-    else {
-        $sql = q{
-            SELECT  s.status,
-                    s.first,
-                    s.last,
-                    x.path
-            FROM    mon.tests    t,
-                    mon.states   s,
-                    main.objects o,
-                    main.objects x
-            WHERE   t.target = o.id
-            AND     t.tester = x.id
-            AND     t.state  = s.id
-            AND     o.path = ?
-            AND     x.path = ?
-        };
-        @params = ($target, $tester);
-    }
-    my $sth = $dbh->prepare($sql);
-    $sth->execute(@ARGV);
-    if (my @row = $sth->fetchrow_array) {
-        my ($code, $first, $last, $xpath) = @row;
-        1;
-    }
+    my $test = db_test($dbh, $target, $tester) || $app->fatal("no such test: $target $tester");
+    print join(' ', @$test{qw(first last status)}), "\n";
+}
+
+sub mon_tests {
+    my ($self, $target) = @_;
+    my $app = $self->app;
+    $app->getopts;
+    $app->usage('run TARGET [TEST...]') if !@ARGV;
+    my @tests = $self->tests($target);
+    1;
 }
 
 sub mon_run {
+    my $self = shift;
+    my $app = $self->app;
+    $app->getopts;
+    $app->usage('run TARGET [TEST...]') if !@ARGV;
+    my @runners = $self->runners(@ARGV);
+    $self->run(@runners);
+    my $dbh = $app->dbh;
+    foreach my $runner (@runners) {
+        my ($t, $o, $x, $status) = @$runner{qw(test target tester status)};
+        my ($opath, $xpath) = map { $app->object($_)->{'path'} } ($o, $x);
+        db_record_test_result($dbh, $t, $status);
+        print join(' ', $status, $opath, $xpath), "\n";
+    }
+}
+
+sub runners {
+    my $self = shift;
+    my $o = shift;
+    my $app = $self->app;
+    my $target = $app->object($o);
+    my $oprops = $app->properties($o);
+    my @tests = @_ ? (map { $self->test($target, $_) } @_) : ($self->tests($target));
+    my @runners;
+    foreach my $test (@tests) {
+        my $x = $test->{'tester'};
+        my $xprops = $app->properties($x);
+        my $cmd = $xprops->{'cmd'} || die;
+        die if @$cmd > 1;
+        $cmd = $cmd->[0];
+        my @cmd = shellwords($cmd);
+        my %var = (
+            'target' => $oprops,
+            'test' => $xprops,
+        );
+        for (@cmd) {
+            s/^[%]\((.+)\)$/$self->expand($1, \%var)/e;
+        }
+        push @runners, {
+            'test' => $test,
+            'target' => $target,
+            'tester' => $app->object($x),
+            'command' => \@cmd,
+        }
+    }
+    return @runners;
+}
+
+sub run {
+    my $self = shift;
+    my $select = IO::Select->new;
+    my (@running, @finish, @done);
+    foreach my $runner (@_) {
+        my @cmd = @{ $runner->{'command'} };
+        open my $fh, '-|', @cmd or die;
+        $select->add($fh);
+        $runner->{'fh'} = $fh;
+        $runner->{'status'} = undef;
+        push @running, $runner;
+    }
+    while (@running) {
+        my @ready = $select->can_read;
+        foreach my $fh (@ready) {
+            my ($test) = grep { $_->{'fh'} eq $fh } @running;
+            my $out = <$fh>;
+            if (defined $out) {
+                chomp $out;
+                $test->{'status'} = $1 if $out =~ /^(OK|ERR|WARN)/;
+                push @finish, $test;
+            }
+            else {
+                $select->remove($fh);
+                $test->{'status'} = close($fh) ? 'OK' : 'ERR';
+            }
+            @running = grep { $_->{'fh'} ne $fh } @running;
+        }
+    }
+    while (@finish) {
+        my @ready = $select->can_read;
+        foreach my $fh (@ready) {
+            my ($test) = grep { $_->{'fh'} eq $fh } @finish;
+            my $out = <$fh>;
+            if (!defined $out) {
+                $test->{'status'} = close($fh) ? 'OK' : 'ERR';
+                @finish = grep { $_->{'fh'} ne $fh } @finish;
+                push @done, $test;
+            }
+        }
+    }
+    return @done;
+}
+
+sub test {
+    my ($self, $target, $tester) = @_;
+    my $dbh = $self->app->dbh;
+    return db_test($target, $tester);
+}
+
+sub tests {
+    my ($self, $target) = @_;
+    my $dbh = $self->app->dbh;
+    return db_tests($dbh, $target);
+}
+
+sub old_mon_run {
     my $self = shift;
     my $app = $self->app;
     $app->getopts;
@@ -258,7 +307,7 @@ sub mon_run {
             'test' => $test,
         );
         for (@cmd) {
-            s/^[%]\((.+)\)$/expand($1, \%var)/e;
+            s/^[%]\((.+)\)$/$self->expand($1, \%var)/e;
         }
         open my $fh, '-|', @cmd or die;
         $select->add($fh);
@@ -266,7 +315,7 @@ sub mon_run {
             'fh' => $fh,
             'target' => $o,
             'test' => $t,
-            'result' => undef,
+            'status' => undef,
         };
     }
     while (@running) {
@@ -276,12 +325,12 @@ sub mon_run {
             my $out = <$fh>;
             if (defined $out) {
                 chomp $out;
-                $test->{'result'} = $1 if $out =~ /^(OK|ERR|WARN)/;
+                $test->{'status'} = $1 if $out =~ /^(OK|ERR|WARN)/;
                 push @finish, $test;
             }
             else {
                 $select->remove($fh);
-                $test->{'result'} = close($fh) ? 'OK' : 'ERR';
+                $test->{'status'} = close($fh) ? 'OK' : 'ERR';
             }
             @running = grep { $_->{'fh'} ne $fh } @running;
         }
@@ -292,7 +341,7 @@ sub mon_run {
             my ($test) = grep { $_->{'fh'} eq $fh } @finish;
             my $out = <$fh>;
             if (!defined $out) {
-                $test->{'result'} = close($fh) ? 'OK' : 'ERR';
+                $test->{'status'} = close($fh) ? 'OK' : 'ERR';
                 @finish = grep { $_->{'fh'} ne $fh } @finish;
                 push @done, $test;
             }
@@ -306,20 +355,35 @@ sub mon_run {
 }
 
 sub expand {
-    my ($str, $var) = @_;
+    my ($self, $str, $var) = @_;
     my $h = $var;
-    if ($str =~ s{^(\w+)}{}) {
-        $h = $h->{$1} or die;
+    my ($opart, $ppart) = split /\./, $str;
+    my ($bpart, @zparts) = split /(?=\[\@)/, $opart;
+    my $app = $self->app;
+    my $hprops;
+    if (@zparts) {
+        # target[@host]
+        $h = $app->object($h->{$bpart}) or die;
+        foreach (@zparts) {
+            s/^\[(\@.+)\]$// or die;
+            my $os = $h->{$1} or die;
+            die if @$os != 1;
+            ($h) = @$os;
+        }
+        $hprops = $app->properties($h);
     }
-    if ($str =~ s{^\.(\w+)}{}) {
-        my $v = $h->{'properties'}{$1};
+    else {
+        $hprops = $h->{$bpart} or die "unexpandable: $str";
+    }
+    if (defined $ppart) {
+        my $v = $hprops->{$ppart};
         die if !defined $v;
         return $v if !ref $v;
         return $v->[0] if ref($v) eq 'ARRAY';
         die;
     }
     else {
-        return $h->{'properties'}{':name'};
+        return $hprops->{':name'};
     }
 }
 
@@ -378,6 +442,140 @@ sub dur2sec {
     }
     $s += $t if $t =~ /^\d+$/;
     return $s;
+}
+
+# --- Database operations
+
+sub db_test {
+    my $dbh = shift;
+    die if !@_;
+    my ($sth, @params);
+    my ($o, $x);
+    if (@_ == 1) {
+        my ($t) = @_;
+        return $_[0] if ref $t;  # db_test($t);
+        die if $t !~ /^[0-9]+$/;
+        $sth = $dbh->prepare('SELECT * FROM mon.tests WHERE id = ?');
+        @params = ($t);
+    }
+    elsif (@_ == 2) {
+        ($o, $x) = @_;  # db_test($o, $x);
+        $o = App::sw::db_oid($dbh, $o);
+        $x = App::sw::db_oid($dbh, $x);
+        $sth = $dbh->prepare('SELECT * FROM mon.tests WHERE target = ? AND tester = ?');
+        @params = ($o, $x);
+    }
+    $sth->execute(@params);
+    my $test = $sth->fetchrow_hashref;
+    $sth->finish;
+    return $test if $test;
+    die "no such test: $_[0]" if @_ == 1;
+    return;
+}
+
+sub db_test_id {
+    my ($dbh, $t) = @_;
+    return $t->{'id'} if ref $t;
+    return $t if $t =~ /^[0-9]+$/;
+    return db_test($t)->{'id'};
+}
+
+sub db_tests {
+    my ($dbh, $o) = @_;
+    my ($sth, @params);
+    if (defined $o) {
+        # db_tests($dbh, $target);
+        my $oid = App::sw::db_oid($dbh, $o);
+        $sth = $dbh->prepare('SELECT * FROM mon.tests WHERE target = ?');
+        @params = ($oid);
+    }
+    else {
+        $sth = $dbh->prepare('SELECT * FROM mon.tests');
+    }
+    my @tests;
+    $sth->execute(@params);
+    while (my $test = $sth->fetchrow_hashref) {
+        push @tests, $test;
+    }
+    return @tests;
+}
+
+sub db_create_test {
+    my ($dbh, $o, $x) = @_;
+    my $oid = App::sw::db_oid($dbh, $o);
+    my $xid = App::sw::db_oid($dbh, $x);
+    my $sth = $dbh->prepare('INSERT INTO mon.tests (target, tester, status) VALUES (?, ?, ?)');
+    $sth->execute($oid, $xid, 'UNKN');
+    my $tid = $dbh->last_insert_id('', '', '', '');
+    return {
+        'id' => $tid,
+        'target' => $oid,
+        'tester' => $xid,
+        'first' => undef,
+        'last' => undef,
+        'status' => 'UNKN',
+    };
+}
+
+sub db_next {
+    my ($dbh, $target, $tester) = @_;
+    my ($sql, @params);
+    if (!defined $target) {
+        $sql = q{
+            SELECT  t.id,
+                    t.next,
+                    o.path,
+                    x.path
+            FROM    mon.tests    t,
+                    main.objects o,
+                    main.objects x
+            WHERE   t.target = o.id
+            AND     t.tester = x.id
+            AND     t.next IS NOT NULL
+            ORDER   BY t.next
+        };
+    }
+    elsif (!defined $tester) {
+        $sql = q{
+            SELECT  t.id,
+                    t.next,
+                    o.path,
+                    x.path
+            FROM    mon.tests    t,
+                    main.objects o,
+                    main.objects x
+            WHERE   t.target = o.id
+            AND     t.tester = x.id
+            AND     o.path = ?
+            AND     t.next IS NOT NULL
+            ORDER   BY t.next
+        };
+        @params = ($target);
+    }
+    else {
+        $sql = q{
+            SELECT  t.id,
+                    t.next,
+                    o.path,
+                    x.path
+            FROM    mon.tests    t,
+                    main.objects o,
+                    main.objects x
+            WHERE   t.target = o.id
+            AND     t.tester = x.id
+            AND     o.path = ?
+            AND     x.path = ?
+            AND     t.next IS NOT NULL
+        };
+        @params = ($target, $tester);
+    }
+    my $sth = $dbh->prepare($sql);
+    $sth->execute(@params);
+    my @out;
+    while (my ($id, $next, $o, $x) = $sth->fetchrow_array) {
+        push @out, { 'id' => $id, 'next' => $next, 'target' => $o, 'tester' => $x };
+    }
+    return @out;
 }
 
 1;
