@@ -37,7 +37,19 @@ sub machines {
 }
 
 sub hosts {
-    shift()->_list_objects('hosts');
+    my ($self) = @_;
+    my $app = $self->app;
+    my ($dotless);
+    $app->getopts(
+        's|dotless' => \$dotless,
+    );
+    my @filter;
+    if ($dotless) {
+        @filter = (sub {
+            basename($_->{'path'}) !~ /\./;
+        });
+    }
+    shift()->_list_objects('hosts', @filter);
 }
 
 sub networks {
@@ -67,7 +79,7 @@ sub machine {
 }
 
 sub _list_objects {
-    my ($self, $what) = @_;
+    my ($self, $what, $filter) = @_;
     my $app = $self->app;
     my ($long, $roots);
     $app->getopts(
@@ -81,6 +93,7 @@ sub _list_objects {
     }
     else {
         my @objects = $self->all($what);
+        @objects = grep { $filter->() } @objects if $filter;
         if ($long) {
             print $_, "\n" for sort map { $_->{'path'} } @objects;
         }
