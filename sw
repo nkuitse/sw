@@ -465,6 +465,12 @@ sub cmd_exists {
     }
 }
 
+sub cmd_plugins {
+    foreach (sort keys %{ $app->plugins }) {
+        print $_, "\n";
+    }
+}
+
 # --- Other functions
 
 sub init {
@@ -876,6 +882,11 @@ sub find {
     my ($self, $o) = splice @_, 0, 2;
     my $dbh = $self->{'dbh'};
     return db_find_objects($dbh, $o, _props(OP_SET|OP_REMOVE|OP_KEY|IS_WILD, @_));
+}
+
+sub plugins {
+    my ($self) = @_;
+    return $self->{'plugins'};
 }
 
 sub walk {
@@ -1493,7 +1504,7 @@ sub _ancestor_paths {
 
 sub init_plugins {
     my ($self, $dir) = @_;
-    my @plugins;
+    my %plugin;
     foreach my $f (glob($dir . '/*.pm')) {
         warning("invalid plugin file name: $f"), next
             if $f !~ m{/([a-z]+)\.pm$};
@@ -1514,12 +1525,12 @@ sub init_plugins {
                 $hook{$hook} = sub { $sub->($plugin) };
             }
             $plugin->init if $plugin->can('init');
-            push @plugins, $plugin;
+            $plugin{$name} = $plugin;
             1;  # OK
         };
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
     }
-    $self->{'plugins'} = \@plugins;
+    $self->{'plugins'} = \%plugin;
 }
 
 sub spawn {
