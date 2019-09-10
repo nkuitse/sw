@@ -34,7 +34,7 @@ my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = DB_FILE;
 (my $dbext = $dbfile) =~ s/.+\.//;
-my (%command, %hook);
+my (%command, %hook, %plugin, %usage, %descrip, %command_source);
 my $app;
 
 chdir $dir or fatal "chdir $dir: $!";
@@ -50,7 +50,8 @@ $cmd =~ tr/-/_/;
 # --- Command handlers
 
 sub cmd_help {
-    print STDERR "Help!\n";
+    #@ help :: show this help
+    usage;
 }
 
 sub cmd_init {
@@ -120,7 +121,7 @@ sub cmd_set {
 }
 
 sub cmd_append {
-    #@ append PATH KEY=VAL...
+    #@ append PATH KEY=VAL... :: append a property to a node
     getopts();
     my $path = argv_path();
     $app->append($path, @ARGV);
@@ -129,7 +130,7 @@ sub cmd_append {
 }
 
 sub cmd_rm {
-    #@ rm [-r] PATH...
+    #@ rm [-r] PATH... :: remove a node
     my $recurse;
     getopts(
         'r|recurse' => \$recurse,
@@ -150,7 +151,7 @@ sub cmd_rm {
 }
 
 sub cmd_mv {
-    #@ mv PATH... NEWPARENT/
+    #@ mv PATH... NEWPARENT/ :: move a node
     getopts();
     usage if @ARGV < 2;
     my $dest = pop @ARGV;
@@ -192,7 +193,7 @@ sub cmd_mv {
 }
 
 sub cmd_ls {
-    #@ ls [-lf] [PATH...]
+    #@ ls [-lf] [PATH...] :: list nodes
     my ($long, $full);
     getopts(
         'l|long' => \$long,
@@ -216,7 +217,7 @@ sub cmd_ls {
 }
 
 sub cmd_tree {
-    #@ tree [PATH...]
+    #@ tree [PATH...] :: show full tree under a node
     my $maxlevel = 999;
     getopts(
         'M=i' => \$maxlevel,
@@ -241,7 +242,7 @@ sub cmd_tree {
 }
 
 sub cmd_get {
-    #@ get [-hpk] [PATH...]
+    #@ get [-hpk] [PATH...] :: get properties of a node
     my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0, 'intrinsics' => 0 );
     getopts(
         'h|header' => \$opt{'header'},
@@ -265,7 +266,7 @@ sub cmd_get {
 }
 
 sub cmd_export {
-    #@ export [PATH...]
+    #@ export [PATH...] :: export a node and its descendants
     # TODO: sort by id to ensure ref integrity when importing!?
     my %opt = ( 'header' => 1, 'keys' => 1, 'intrinsics' => 0 );
     my $maxlevel = 999;
@@ -316,8 +317,7 @@ sub _dump_object {
 }
 
 sub cmd_bind {
-    #@ bind NAME PATH
-    #= bind a name to a node
+    #@ bind NAME PATH :: bind a name to a node
     getopts();
     usage if @ARGV != 2;
     my $name = shift @ARGV;
@@ -397,6 +397,7 @@ sub cmd_import {
 sub cmd_find {
     #@ find [-1] [PATH] [KEY=VAL...]
     #@ find [-1] '[' PATH... ']' [KEY=VAL...]
+    #= list nodes that meet given criteria
     my ($single, $print_value);
     getopts(
         '1' => \$single,
@@ -438,6 +439,7 @@ sub cmd_find {
 
 sub cmd_config {
     #@ config [--program | --prefix | --db-dir | --db-file | --plugin-dir | --env-var]...
+    #= show configuration data
     unshift @ARGV, '--' if @ARGV && $ARGV[0] =~ /^-/;
     getopts();
     my %config = (
@@ -465,8 +467,50 @@ sub cmd_exists {
     }
 }
 
+sub cmd_commands {
+    #@ commands :: list commands
+    foreach my $f (uniq(map { $_->[2] } values %command_source)) {
+        open my $fh, '<', $f or fatal "open $f: $!";
+        my $cmd;
+        while (<$fh>) {
+            $cmd = $1, next if /^sub cmd_(\S+)/;
+            chomp;
+            if (s/^\s*#\@\s*//) {
+                s/\s+::\s*(.+)//;
+                $usage{$cmd}{$f} = $_;
+                $descrip{$cmd}{$f} = $1;
+            }
+            elsif (s/^\s+#=\s+//) {
+                $descrip{$cmd}{$f} = $_;
+            }
+        }
+    }
+    my %source = (
+        (PROG) => { '.label' => 'built-in commands' },
+    );
+    foreach my $cmd (sort keys %command_source) {
+        my ($type, $name, $file) = @{ $command_source{$cmd} };
+        my $key = $type eq 'script' ? $name : "${type}:${name}";
+        $source{$key}{$cmd} = $file;
+    }
+    foreach my $key (PROG, sort keys %source) {
+        my $source = delete $source{$key} or next;
+        my $label = delete $source->{'.label'} || $key;
+        $label =~ s/^plugin:/plugin /;
+        print STDERR '[', $label, "]\n";
+        foreach my $cmd (sort keys %$source) {
+            my $file = $source->{$cmd};
+            my $usage = $usage{$cmd}{$file};
+            my $descrip = $descrip{$cmd}{$file} || '';
+            printf STDERR "%-16.16s %s\n", $cmd, $descrip;
+        }
+        print STDERR "\n";
+    }
+}
+
 sub cmd_plugins {
-    foreach (sort keys %{ $app->plugins }) {
+    #@ plugins :: list plugins
+    foreach (sort keys %plugin) {
         print $_, "\n";
     }
 }
@@ -577,10 +621,16 @@ sub init_commands {
     while (my ($k, $v) = each %$h) {
         next if $k !~ s/^cmd_//;
         $command{$k} = $v;
+        $command_source{$k} = ['script', PROG, "$Bin/$Script"];
     }
 }
 
-sub current_command {
+sub uniq {
+    my (%seen, @out);
+    foreach (@_) {
+        push @out, $_ if !$seen{$_}++;
+    }
+    return @out;
 }
 
 sub fatal {
@@ -1504,31 +1554,37 @@ sub _ancestor_paths {
 
 sub init_plugins {
     my ($self, $dir) = @_;
-    my %plugin;
     foreach my $f (glob($dir . '/*.pm')) {
         warning("invalid plugin file name: $f"), next
             if $f !~ m{/([a-z]+)\.pm$};
         my ($name, $cls) = ($1, "App::sw::Plugin::$1");
-        my $ok = eval {
+        my $plugin = eval {
             require $f;
-            my $plugin = $cls->new('app' => $self);
-            my %c = eval { $plugin->commands };
-            my %h = eval { $plugin->hooks };
+            my $instance = $cls->new('app' => $self);
+            my %c = eval { $instance->commands };
+            my %h = eval { $instance->hooks };
             while (my ($cmd, $sub) = each %c) {
                 die "plugin $name provides command $cmd but it is already provided"
                     if exists $command{$cmd};
-                $command{$cmd} = sub { $sub->($plugin) };
+                $command{$cmd} = sub { $sub->($instance) };
+                $command_source{$cmd} = ['plugin', $name, $f];
             }
             while (my ($hook, $sub) = each %h) {
                 die "plugin $name provides hook $hook but it is already provided"
                     if exists $hook{$hook};
-                $hook{$hook} = sub { $sub->($plugin) };
+                $hook{$hook} = sub { $sub->($instance) };
             }
-            $plugin->init if $plugin->can('init');
-            $plugin{$name} = $plugin;
-            1;  # OK
+            $instance->init if $instance->can('init');
+            $plugin{$name} = {
+                'name' => $name,
+                'file' => $f,
+                'class' => $cls,
+                'instance' => $instance,
+                'commands' => \%c,
+                'hooks' => \%h,
+            };
         };
-        die "can't load plugin $name: ", (split /\n/, $@)[0] if !$ok;
+        die "can't load plugin $name: ", (split /\n/, $@)[0] if !$plugin;
     }
     $self->{'plugins'} = \%plugin;
 }
