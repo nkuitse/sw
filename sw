@@ -1602,8 +1602,8 @@ sub init_plugins {
 }
 
 sub formatter {
-    my ($format) = @_;
-    return $formatter{$format} || fatal "no such formatter: $format";
+    my ($self, $format) = @_;
+    return $formatter{$format} || $self->fatal("no such formatter: $format");
 }
 
 sub spawn {
