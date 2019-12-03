@@ -172,10 +172,11 @@ sub mon_status {
 }
 
 sub mon_tests {
-    my ($self, $target) = @_;
+    my ($self) = @_;
     my $app = $self->app;
     $app->getopts;
-    $app->usage('run TARGET [TEST...]') if !@ARGV;
+    $app->usage('tests TARGET [TEST...]') if !@ARGV;
+    my $target = shift @ARGV;
     my @tests = $self->tests($target);
     1;
 }

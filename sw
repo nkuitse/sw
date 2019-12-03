@@ -34,7 +34,7 @@ my $root = PREFIX . '/' . PROG;
 my $dir = $ENV{ENV_VAR()} || DB_DIR;
 my $dbfile = DB_FILE;
 (my $dbext = $dbfile) =~ s/.+\.//;
-my (%command, %hook, %plugin, %usage, %descrip, %command_source);
+my (%command, %hook, %plugin, %formatter, %usage, %descrip, %command_source);
 my $app;
 
 chdir $dir or fatal "chdir $dir: $!";
@@ -243,8 +243,10 @@ sub cmd_tree {
 
 sub cmd_get {
     #@ get [-hpk] [PATH...] :: get properties of a node
+    my $formatter;
     my %opt = ( 'header' => 0, 'path' => 0, 'keys' => 0, 'intrinsics' => 0 );
     getopts(
+        'f|format=s' => sub { $formatter = $app->formatter($_[1]) },
         'h|header' => \$opt{'header'},
         'p|path' => \$opt{'path'},
         'k|keys' => \$opt{'keys'},
@@ -262,15 +264,17 @@ sub cmd_get {
     else {
         $opt{'keys'} = 1;
     }
-    _dump_object($obj, \%opt, @props);
+    _dump_object($obj, $formatter, \%opt, @props);
 }
 
 sub cmd_export {
     #@ export [PATH...] :: export a node and its descendants
     # TODO: sort by id to ensure ref integrity when importing!?
+    my $formatter;
     my %opt = ( 'header' => 1, 'keys' => 1, 'intrinsics' => 0 );
     my $maxlevel = 999;
     getopts(
+        'f|format=s' => sub { $formatter = $app->formatter($_[1]) },
         'i|intrinsics' => \$opt{'intrinsics'},
         'M=i' => \$maxlevel,
         '0' => sub { $maxlevel = 0 },
@@ -281,13 +285,13 @@ sub cmd_export {
     $app->walk(sub {
         my ($obj, $level, @children) = @_;
         print "\n" if $n++;
-        _dump_object($obj, \%opt, $app->get($obj));
+        _dump_object($obj, $formatter, \%opt, $app->get($obj));
         return -1 if $level == $maxlevel;
     }, @ARGV);
 }
 
 sub _dump_object {
-    my ($obj, $opt, @props) = @_;
+    my ($obj, $formatter, $opt, @props) = @_;
     if ($opt->{'header'}) {
         my $path = $obj->{'path'};
         print $path, "\n";
@@ -398,8 +402,9 @@ sub cmd_find {
     #@ find [-1] [PATH] [KEY=VAL...]
     #@ find [-1] '[' PATH... ']' [KEY=VAL...]
     #= list nodes that meet given criteria
-    my ($single, $print_value);
+    my ($formatter, $single, $print_value);
     getopts(
+        'f|format=s' => sub { $formatter = $app->formatter($_[1]) },
         '1' => \$single,
         'v' => \$print_value,
     );
@@ -420,7 +425,7 @@ sub cmd_find {
                         @props = grep { $want{$_->[0]} } @props;
                         $opt{'sort'} = [ @ARGV ];
                     }
-                    _dump_object($obj, \%opt, @props);
+                    _dump_object($obj, $formatter, \%opt, @props);
                     print "\n";
                 }
                 return if $single;
@@ -1563,6 +1568,7 @@ sub init_plugins {
             my $instance = $cls->new('app' => $self);
             my %c = eval { $instance->commands };
             my %h = eval { $instance->hooks };
+            my %f = eval { $instance->formatters };
             while (my ($cmd, $sub) = each %c) {
                 die "plugin $name provides command $cmd but it is already provided"
                     if exists $command{$cmd};
@@ -1574,6 +1580,11 @@ sub init_plugins {
                     if exists $hook{$hook};
                 $hook{$hook} = sub { $sub->($instance) };
             }
+            while (my ($formatter, $sub) = each %f) {
+                die "plugin $name provides formatter $formatter but it is already provided"
+                    if exists $formatter{$formatter};
+                $formatter{$formatter} = sub { $sub->($instance, @_) };
+            }
             $instance->init if $instance->can('init');
             $plugin{$name} = {
                 'name' => $name,
@@ -1582,11 +1593,17 @@ sub init_plugins {
                 'instance' => $instance,
                 'commands' => \%c,
                 'hooks' => \%h,
+                'formatters' => \%f,
             };
         };
         die "can't load plugin $name: ", (split /\n/, $@)[0] if !$plugin;
     }
     $self->{'plugins'} = \%plugin;
+}
+
+sub formatter {
+    my ($format) = @_;
+    return $formatter{$format} || fatal "no such formatter: $format";
 }
 
 sub spawn {
